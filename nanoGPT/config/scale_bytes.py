@@ -1,0 +1,26 @@
+# nanoGPT Scale-up: 3L/128D on bytes (matches VECTOR scale)
+dataset = 'bytes'
+batch_size = 1
+block_size = 256
+n_layer = 3
+n_head = 4
+n_embd = 128
+dropout = 0.0
+bias = False
+learning_rate = 6e-4
+max_iters = 1000
+weight_decay = 1e-1
+beta1 = 0.9
+beta2 = 0.95
+grad_clip = 1.0
+decay_lr = True
+warmup_iters = 100
+lr_decay_iters = 1000
+min_lr = 6e-5
+device = 'cpu'
+dtype = 'float32'
+compile = False
+eval_interval = 500
+log_interval = 10
+always_save_checkpoint = True
+out_dir = 'out_gpt_scale'

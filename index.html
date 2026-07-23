@@ -1,0 +1,498 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Stream: Continuous Byte-Level State Space Language Models</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg: #0a0a0a;
+  --surface: #111111;
+  --surface2: #1a1a1a;
+  --border: #222222;
+  --text: #e0e0e0;
+  --text2: #888888;
+  --accent: #ffffff;
+  --green: #4ade80;
+  --yellow: #facc15;
+  --red: #f87171;
+  --blue: #60a5fa;
+  --purple: #a78bfa;
+  --orange: #fb923c;
+  --cyan: #22d3ee;
+  --font: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  --mono: 'JetBrains Mono', monospace;
+}
+body { font-family: var(--font); background: var(--bg); color: var(--text); line-height: 1.7; -webkit-font-smoothing: antialiased; }
+.container { max-width: 1100px; margin: 0 auto; padding: 2rem 1.5rem; }
+
+/* Paper header */
+.paper-header { border-bottom: 1px solid var(--border); padding-bottom: 2.5rem; margin-bottom: 2rem; text-align: center; }
+.paper-header .badge { display: inline-block; font-size: 0.65rem; padding: 0.2rem 0.6rem; border-radius: 3px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; margin-bottom: 1rem; background: rgba(96, 165, 250, 0.15); color: var(--blue); border: 1px solid rgba(96, 165, 250, 0.3); }
+.paper-header h1 { font-size: 2.2rem; font-weight: 600; letter-spacing: -0.03em; color: var(--accent); line-height: 1.3; margin-bottom: 0.75rem; }
+.paper-header .authors { font-size: 0.95rem; color: var(--text2); margin-bottom: 0.5rem; }
+.paper-header .affiliation { font-size: 0.8rem; color: var(--text2); margin-bottom: 1rem; }
+.paper-header .date { font-size: 0.75rem; color: var(--text2); }
+.paper-nav { display: flex; gap: 0.5rem; justify-content: center; flex-wrap: wrap; margin-top: 1.25rem; }
+.paper-nav a { color: var(--text2); text-decoration: none; font-size: 0.75rem; padding: 0.3rem 0.75rem; border: 1px solid var(--border); border-radius: 4px; transition: all 0.15s; }
+.paper-nav a:hover { color: var(--accent); border-color: var(--text2); }
+.paper-nav a.active { color: var(--accent); border-color: var(--accent); }
+
+/* Section styling */
+.section { margin-bottom: 2.5rem; }
+.section h2 { font-size: 1.35rem; font-weight: 600; color: var(--accent); margin-bottom: 1rem; padding-bottom: 0.4rem; border-bottom: 1px solid var(--border); letter-spacing: -0.01em; }
+.section h3 { font-size: 1.05rem; font-weight: 600; color: var(--accent); margin: 1.25rem 0 0.6rem; }
+.section p { font-size: 0.92rem; color: var(--text); margin-bottom: 0.75rem; line-height: 1.75; }
+.section .note { font-size: 0.82rem; color: var(--text2); margin-bottom: 0.75rem; }
+
+.figure-container { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; margin: 1.25rem 0; text-align: center; overflow: hidden; }
+.figure-container img { max-width: 100%; height: auto; border-radius: 4px; display: block; margin: 0 auto; }
+.figure-container .caption { font-size: 0.8rem; color: var(--text2); margin-top: 0.6rem; text-align: left; }
+
+.math { font-family: var(--mono); font-size: 0.85rem; color: var(--cyan); background: var(--surface2); padding: 0.1rem 0.3rem; border-radius: 3px; }
+.math-block { font-family: var(--mono); font-size: 0.85rem; color: var(--cyan); background: var(--surface2); padding: 0.75rem 1rem; border-radius: 6px; margin: 0.75rem 0; overflow-x: auto; white-space: pre; border: 1px solid var(--border); }
+
+ul, ol { margin: 0.5rem 0 0.75rem 1.5rem; }
+li { font-size: 0.9rem; color: var(--text); margin-bottom: 0.3rem; }
+
+/* Card grid */
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; margin-bottom: 1.5rem; }
+.grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1.25rem; margin-bottom: 1.5rem; }
+@media (max-width: 768px) { .grid-2, .grid-3 { grid-template-columns: 1fr; } }
+
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.25rem; margin-bottom: 1rem; }
+.card .card-title { font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text2); margin-bottom: 0.5rem; }
+.card .value { font-size: 1.4rem; font-weight: 300; color: var(--accent); margin: 0.15rem 0; }
+.card .value.small { font-size: 1rem; }
+
+table { width: 100%; border-collapse: collapse; margin-bottom: 1rem; }
+th { text-align: left; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text2); padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border); font-weight: 500; }
+td { padding: 0.45rem 0.75rem; border-bottom: 1px solid var(--border); font-size: 0.82rem; }
+
+.status-badge { display: inline-block; font-size: 0.6rem; padding: 0.15rem 0.45rem; border-radius: 3px; font-weight: 600; letter-spacing: 0.03em; }
+.status-badge.pass { background: rgba(74, 222, 128, 0.15); color: var(--green); border: 1px solid rgba(74, 222, 128, 0.3); }
+.status-badge.warn { background: rgba(250, 204, 21, 0.15); color: var(--yellow); border: 1px solid rgba(250, 204, 21, 0.3); }
+.status-badge.fail { background: rgba(248, 113, 113, 0.15); color: var(--red); border: 1px solid rgba(248, 113, 113, 0.3); }
+.status-badge.pending { background: rgba(96, 165, 250, 0.15); color: var(--blue); border: 1px solid rgba(96, 165, 250, 0.3); }
+.status-badge.info { background: rgba(167, 139, 250, 0.15); color: var(--purple); border: 1px solid rgba(167, 139, 250, 0.3); }
+
+/* Test report */
+.test-block { background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; padding: 0.75rem; margin-bottom: 0.75rem; }
+.test-block .test-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.4rem; }
+.test-block .test-name { font-size: 0.85rem; font-weight: 500; color: var(--accent); }
+.test-block .test-meta { font-size: 0.7rem; color: var(--text2); }
+.test-block .test-stats { display: flex; gap: 1.5rem; flex-wrap: wrap; font-size: 0.8rem; color: var(--text2); margin-top: 0.35rem; }
+.test-block .test-stats span { display: flex; align-items: center; gap: 0.3rem; }
+
+.log-container { max-height: 400px; overflow-y: auto; background: #000; border: 1px solid var(--border); border-radius: 6px; padding: 0.75rem; font-family: var(--mono); font-size: 0.72rem; line-height: 1.5; }
+.log-container .log-line { white-space: pre; color: var(--text2); }
+.log-container .log-line.val { color: var(--green); font-weight: 500; }
+.log-container .log-line.iter { color: var(--blue); }
+.log-container .log-line.warn { color: var(--yellow); }
+
+.references { font-size: 0.82rem; color: var(--text2); }
+.references li { margin-bottom: 0.4rem; }
+
+.warning-box { background: rgba(248, 113, 113, 0.06); border: 1px solid rgba(248, 113, 113, 0.2); border-radius: 6px; padding: 1rem; margin-bottom: 1rem; }
+.warning-box .title { font-size: 0.7rem; font-weight: 600; color: var(--red); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.4rem; }
+
+.insight-box { background: rgba(96, 165, 250, 0.06); border: 1px solid rgba(96, 165, 250, 0.2); border-radius: 6px; padding: 1rem; margin-bottom: 1rem; }
+.insight-box .title { font-size: 0.7rem; font-weight: 600; color: var(--blue); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.4rem; }
+
+.toc { position: sticky; top: 1rem; min-width: 0; }
+.grid-2 > *, .grid-3 > * { min-width: 0; }
+.toc ol { list-style: none; margin: 0; }
+.toc li { padding: 0.25rem 0; font-size: 0.8rem; }
+.toc a { color: var(--text2); text-decoration: none; }
+.toc a:hover { color: var(--accent); }
+
+footer { border-top: 1px solid var(--border); padding-top: 1.5rem; margin-top: 2.5rem; font-size: 0.75rem; color: var(--text2); text-align: center; }
+
+@media (max-width: 768px) {
+  .paper-header h1 { font-size: 1.5rem; }
+}
+</style>
+</head>
+<body>
+<div class="container">
+
+<!-- Paper Header -->
+<header class="paper-header">
+  <div class="badge">Research Report &middot; July 2026</div>
+  <h1>Stream: Continuous Byte-Level<br>State Space Language Models</h1>
+  <div class="authors">VECTOR Research</div>
+  <div class="affiliation">Independent Research</div>
+  <div class="date">Last updated: July 23, 2026</div>
+  <nav class="paper-nav">
+    <a href="#abstract">Abstract</a>
+    <a href="#introduction">Introduction</a>
+    <a href="#architecture">Architecture</a>
+    <a href="#vector">VECTOR</a>
+    <a href="#experiments">Experiments</a>
+    <a href="moe.html" style="border-color: rgba(74, 222, 128, 0.3); color: var(--green);">MoE-Stream</a>
+    <a href="#testreport">Test Report</a>
+    <a href="#references">References</a>
+  </nav>
+</header>
+
+<div class="grid-2" style="grid-template-columns: 220px 1fr; gap: 2rem;">
+<div class="toc" style="min-width: 0;">
+  <div class="card" style="padding: 0.75rem;">
+    <div class="card-title">Contents</div>
+    <ol>
+      <li><a href="#abstract">Abstract</a></li>
+      <li><a href="#introduction">Introduction</a></li>
+      <li><a href="#architecture">Architecture</a></li>
+      <li><a href="#vector">VECTOR</a></li>
+      <li><a href="#experiments">Experiments</a></li>
+      <li><a href="#moelink">MoE-Stream</a></li>
+      <li><a href="#analysis">Analysis</a></li>
+      <li><a href="#testreport">Test Report</a></li>
+      <li><a href="#references">References</a></li>
+    </ol>
+  </div>
+</div>
+<div style="min-width: 0;">
+
+
+<!-- Abstract -->
+<section id="abstract" class="section">
+  <h2>Abstract</h2>
+  <p>We present <strong>Stream</strong>, a token-free, position-free language model built entirely on state space model (SSM) recurrence operating directly on raw bytes. Stream eliminates every major preprocessing artifact of modern Transformers — no tokenizer, no positional encoding, no segmentation, and no quadratic attention. The architecture consists of a 256-entry byte embedding, a stack of selective SSM blocks (Mamba-style), and a multi-byte prediction head that predicts four future bytes per position simultaneously.</p>
+  <p>Despite using only 256 vocabulary entries compared to the 50k+ of typical subword models, Stream achieves a validation loss of <strong>1.69</strong> at 4.43M parameters, compared to 1.20 for a similarly-sized Transformer (nanoGPT 8L/192D at 3.59M). The 0.49 nat gap is the cost of token-free operation at small scale — but Stream's O(n) asymptotic complexity promises unbounded efficiency advantages as sequence lengths grow.</p>
+  <p>We further introduce <strong>VECTOR</strong>, an augmented architecture adding learned position pruning via a saliency gate with straight-through estimation, mixture-of-experts layers, and a five-term dual-objective loss. Finally, we present <strong>MoE-Stream</strong>, which augments Stream with sparse mixture-of-experts layers with gradient-aware expert lifecycle management.</p>
+</section>
+
+<!-- Introduction -->
+<section id="introduction" class="section">
+  <h2>1. Introduction</h2>
+  <p>The Transformer architecture (Vaswani et al., 2017) has dominated natural language processing for nearly a decade, but its reliance on discrete subword tokenization introduces fundamental limitations. Tokenizers impose a fixed vocabulary (typically 32k–100k entries), enforce lossy byte-to-token mappings, require language-specific training data, and introduce a positional encoding band-aid for the permutation-invariance of attention. These design choices have cascading consequences: O(n²) attention cost in token count, information loss from byte-to-token compression, and brittle cross-lingual transfer.</p>
+  <p>Recent work on state space models — S4 (Gu et al., 2021), Mamba (Gu & Dao, 2023), and Mamba-2 (Dao & Gu, 2024) — has demonstrated that linear-complexity recurrence can match or approach Transformer quality on language modeling. These models process tokens through a learned state space recurrence of the form:</p>
+  <div class="math-block">h_t = A_bar · h_{t-1} + B_bar · x_t
+y_t = C_t · h_t + D · x_t</div>
+  <p>where Ā = exp(Δ_t A) and B̄ = Δ_t B are discretized via a learned timescale Δ_t. Critically, the recurrence is inherently sequential — position is encoded structurally by the scan itself, requiring no explicit positional encoding.</p>
+  <p><strong>Stream</strong> extends this paradigm to its logical conclusion: if recurrence is position, and if a 256-byte vocabulary is sufficient to represent all of text, then the entire tokenization pipeline can be eliminated.</p>
+  <div class="grid-3">
+    <div class="card">
+      <div class="card-title">Token-Free</div>
+      <div class="value">256</div>
+      <div class="note">vocabulary entries — no BPE, no WordPiece</div>
+    </div>
+    <div class="card">
+      <div class="card-title">Position-Free</div>
+      <div class="value">SSM</div>
+      <div class="note">recurrence encodes position structurally</div>
+    </div>
+    <div class="card">
+      <div class="card-title">Complexity</div>
+      <div class="value">O(n)</div>
+      <div class="note">linear in byte length, not quadratic in tokens</div>
+    </div>
+  </div>
+</section>
+
+<!-- Architecture -->
+<section id="architecture" class="section">
+  <h2>2. Stream Architecture</h2>
+  <p>Stream is designed as the simplest possible byte-level SSM language model. The input is a sequence of raw bytes b_1, b_2, ..., b_T ∈ [0, 255], mapped to d-dimensional embeddings via a learned lookup table — the only "vocabulary" in the model.</p>
+
+  <div class="figure-container">
+    <img src="paper/figures/fig1_architecture.png" alt="Stream Architecture">
+    <div class="caption"><strong>Figure 1:</strong> Stream architecture overview (top) and SSM block detail (bottom). The pipeline: raw bytes → byte embedding → SSM blocks × N layers → multi-byte head → loss.</div>
+  </div>
+
+  <h3>2.1 Selective SSM Block</h3>
+  <p>Each Stream layer is a selective state space model block based on Mamba's design. The core recurrence maintains a hidden state h_t that evolves through:</p>
+  <div class="math-block">A = -exp(A_log)              ← log-space param for stability
+Δ_t = softplus(W_Δ · x_t)     ← input-dependent step size
+h_t = h_{t-1} · exp(Δ_t·A) + Δ_t·B_t·x_t
+y_t = C_t · h_t + D · x_t</div>
+  <p>Each block includes: (1) an input projection expanding d → 2d_hidden with SiLU activation and gating, (2) a depthwise 1D convolution (kernel size 4) with SiLU, (3) the selective SSM scan, and (4) an output projection with residual connection and layer normalization.</p>
+
+  <h3>2.2 Multi-Byte Prediction Head</h3>
+  <p>From each position t, Stream predicts the next n_predict bytes simultaneously — a linear projection from d to n_predict × 256 logits. The loss is:</p>
+  <div class="math-block">L = (1/n_predict) · Σ_{k=1}^{n_predict} CE(logits_{t,k}, b_{t+k})</div>
+  <p>This provides <strong>4× training signal</strong> per position and enables <strong>4× faster autoregressive decoding</strong> (predict 4 bytes per model step).</p>
+
+  <div class="figure-container">
+    <img src="paper/figures/fig7_multibyte.png" alt="Multi-byte Prediction">
+    <div class="caption"><strong>Figure 7:</strong> Per-position multi-byte prediction head. Each position predicts 4 future bytes simultaneously, providing 4× the training signal of standard next-token prediction.</div>
+  </div>
+
+  <div class="figure-container">
+    <img src="paper/figures/fig9_token_free.png" alt="Token-Free Processing">
+    <div class="caption"><strong>Figure 9:</strong> Comparison of token-based vs Stream's token-free processing for the word "Hello". Stream operates on raw bytes with vocabulary 256, while token-based models use 50k+ subword entries.</div>
+  </div>
+</section>
+
+<!-- VECTOR -->
+<section id="vector" class="section">
+  <h2>3. VECTOR Architecture</h2>
+  <p>VECTOR (Versatile Efficient Concept Transformer Optimized Runtime) extends Stream with three additional components: a learned position-pruning gate, local attention, and mixture-of-experts layers, all supervised by a five-term loss function.</p>
+
+  <h3>3.1 Saliency Gate</h3>
+  <p>The gate learns to prune uninformative positions via a learned threshold θ:</p>
+  <div class="math-block">s_t = mean_d(|x_t| · σ(θ))
+m_t = STE(s_t &gt; 0.5)</div>
+  <p>where STE (straight-through estimator) uses hard thresholding in the forward pass but flows gradients through the soft score in the backward pass.</p>
+
+  <h3>3.2 Five-Term Dual Loss</h3>
+  <div class="math-block">L = L_pred + α·L_recon + β·L_budget + γ·L_anchor + L_balance</div>
+  <table>
+    <thead><tr><th>Term</th><th>Purpose</th><th>Weight</th></tr></thead>
+    <tbody>
+      <tr><td>L_pred</td><td>Standard next-byte cross-entropy</td><td>1.0</td></tr>
+      <tr><td>L_recon</td><td>MSE at masked positions (maintain info at pruned locations)</td><td>α = 1.0</td></tr>
+      <tr><td>L_budget</td><td>Push active ratio toward target C_target / block_size</td><td>β = 0.01</td></tr>
+      <tr><td>L_anchor</td><td>Cosine distance between consecutive layer outputs</td><td>γ = 0.001</td></tr>
+      <tr><td>L_balance</td><td>MoE load balancing auxiliary loss</td><td>1.0</td></tr>
+    </tbody>
+  </table>
+
+  <h3>3.3 Gate Collapse Analysis</h3>
+  <div class="warning-box">
+    <div class="title">Critical Finding</div>
+    <p>The SaliencyGate learns to keep all positions (active_ratio = 1.0) and never prunes. Three contributing factors identified: (1) zero pruning pressure during warmup, (2) hinge budget loss vanishes once T_eff ≤ C_target, removing gradient, (3) no countervailing force pushing atoms out.</p>
+  </div>
+
+  <div class="figure-container">
+    <img src="paper/figures/fig8_gate_analysis.png" alt="Gate Collapse">
+    <div class="caption"><strong>Figure 8:</strong> VECTOR gate collapse analysis. Active ratio remains at 1.0 throughout training while budget loss decays to zero — the gate learns to keep everything because no loss term actively pushes it to prune.</div>
+  </div>
+</section>
+
+<!-- Experiments -->
+<section id="experiments" class="section">
+  <h2>4. Experiments</h2>
+
+  <h3>4.1 Setup</h3>
+  <p>All models trained on the <strong>bytes dataset</strong> — raw UTF-8 bytes from TinyStories, vocabulary size 256 (no tokenization). Training uses the nanoGPT harness with cosine LR decay, AdamW (β₁=0.9, β₂=0.95), weight decay 0.1, gradient clipping 1.0, float32 on CPU.</p>
+
+  <table>
+    <thead><tr><th>Model</th><th>Params</th><th>Layers</th><th>Dim</th><th>SSM State</th><th>Block</th><th>Iters</th></tr></thead>
+    <tbody>
+      <tr><td>Stream 4L/128D</td><td>0.85M</td><td>4</td><td>128</td><td>8</td><td>256</td><td>1000</td></tr>
+      <tr><td>Stream 6L/256D</td><td>4.43M</td><td>6</td><td>256</td><td>16</td><td>256</td><td>1500</td></tr>
+      <tr><td>VECTOR 2L/64D</td><td>0.45M</td><td>2</td><td>64</td><td>4</td><td>128</td><td>1000</td></tr>
+      <tr><td>VECTOR 3L/128D</td><td>3.39M</td><td>3</td><td>128</td><td>8</td><td>128</td><td>1000</td></tr>
+      <tr><td>MoE-Stream 4L/128D</td><td>~1.5M</td><td>4</td><td>128</td><td>8</td><td>256</td><td>1000</td></tr>
+      <tr><td>nanoGPT 3L/128D</td><td>0.62M</td><td>3</td><td>128</td><td>—</td><td>256</td><td>1000</td></tr>
+      <tr><td>nanoGPT 8L/192D</td><td>3.59M</td><td>8</td><td>192</td><td>—</td><td>256</td><td>1000</td></tr>
+    </tbody>
+  </table>
+
+  <h3>4.2 Validation Loss Results</h3>
+
+  <div class="figure-container">
+    <img src="paper/figures/fig2_val_loss.png" alt="Validation Loss">
+    <div class="caption"><strong>Figure 2:</strong> Validation loss comparison. Stream 6L/256D (4.43M) achieves 1.69 — within 0.49 of nanoGPT 8L/192D (3.59M, 1.20). Stream 4L/128D (0.85M, 2.35) compares to nanoGPT 3L/128D (0.62M, 1.67). VECTOR underperforms due to gate collapse.</div>
+  </div>
+
+  <div class="figure-container">
+    <img src="paper/figures/fig3_scaling.png" alt="Scaling Efficiency">
+    <div class="caption"><strong>Figure 3:</strong> Scaling efficiency — loss vs parameters. Stream follows a similar trend to nanoGPT with a ~0.5 nat penalty for token-free operation.</div>
+  </div>
+
+  <div class="figure-container">
+    <img src="paper/figures/fig5_loss_curves.png" alt="Training Dynamics">
+    <div class="caption"><strong>Figure 5:</strong> Training dynamics across architectures. Stream converges smoothly; VECTOR's gate collapse produces a higher loss floor.</div>
+  </div>
+
+  <h3>4.3 Wall-Time Benchmark</h3>
+
+  <div class="figure-container">
+    <img src="paper/figures/fig4_walltime.png" alt="Wall-Time Benchmark">
+    <div class="caption"><strong>Figure 4:</strong> CPU forward pass wall-time. <strong>Important caveat:</strong> Stream's naive Python for-loop SSM scan is 25-50× slower than nanoGPT's BLAS-backed attention. This measures Python-loop overhead, not O(n) vs O(n²). A fair comparison requires a CUDA kernel.</div>
+  </div>
+
+  <div class="figure-container">
+    <img src="paper/figures/fig6_complexity.png" alt="Complexity">
+    <div class="caption"><strong>Figure 6:</strong> Asymptotic complexity comparison. Stream's O(n) SSM vs Transformer's O(n²) attention — the advantage grows with sequence length.</div>
+  </div>
+
+  <div class="figure-container">
+    <img src="paper/figures/fig10_summary_table.png" alt="Summary Table">
+    <div class="caption"><strong>Figure 10:</strong> Complete experimental results summary across all tested architectures.</div>
+  </div>
+
+  <table>
+    <thead><tr><th>Model</th><th>Params</th><th>Val Loss</th><th>Iters</th><th>Fair Test?</th></tr></thead>
+    <tbody>
+      <tr><td style="color:var(--accent);">Stream 4L/128D</td><td>0.85M</td><td>2.35</td><td>1000</td><td><span class="status-badge pass">YES</span></td></tr>
+      <tr><td style="color:var(--accent);">Stream 6L/256D</td><td>4.43M</td><td>1.69</td><td>1500</td><td><span class="status-badge pass">YES</span></td></tr>
+      <tr><td>VECTOR 2L/64D (bypass)</td><td>0.45M</td><td>3.57</td><td>1000</td><td><span class="status-badge pass">YES — bypass</span></td></tr>
+      <tr><td>VECTOR 2L/64D (real gate)</td><td>0.45M</td><td>3.57</td><td>1000</td><td><span class="status-badge warn">gate not discriminating</span></td></tr>
+      <tr><td style="color:var(--text2);">VECTOR 3L/128D</td><td>3.39M</td><td>2.98</td><td>1000</td><td><span class="status-badge fail">NO — gate bug</span></td></tr>
+      <tr><td style="color:var(--text2);">nanoGPT 3L/128D</td><td>0.62M</td><td>1.67</td><td>1000</td><td><span class="status-badge pass">YES</span></td></tr>
+      <tr><td style="color:var(--text2);">nanoGPT 8L/192D</td><td>3.59M</td><td>1.20</td><td>1000</td><td><span class="status-badge pass">YES</span></td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- MoE-Stream Link -->
+<section id="moelink" class="section">
+  <h2>5. MoE-Stream</h2>
+  <p>MoE-Stream augments Stream with sparse mixture-of-experts feed-forward layers and gradient-aware expert lifecycle management. Each expert tracks impact-to-frequency value scores to distinguish rare-but-valuable specialists from truly dead experts. Expert replacement clones the best expert with noise rather than random initialization.</p>
+  <div style="text-align: center; margin: 1.5rem 0;">
+    <a href="moe.html" style="display: inline-block; padding: 0.7rem 1.5rem; background: var(--surface); border: 1px solid rgba(74, 222, 128, 0.3); border-radius: 6px; color: var(--green); text-decoration: none; font-weight: 500; transition: all 0.15s;" onmouseover="this.style.borderColor='var(--green)'" onmouseout="this.style.borderColor='rgba(74, 222, 128, 0.3)'">
+      &#8594; View Full MoE-Stream Report &rsaquo;
+    </a>
+  </div>
+</section>
+
+<!-- Analysis -->
+<section id="analysis" class="section">
+  <h2>6. Analysis</h2>
+
+  <h3>6.1 The Cost of Token-Free Operation</h3>
+  <p>Stream's 0.49 nat gap to nanoGPT at matched parameters is the empirical cost of token-free byte-level modeling. This gap likely arises from: (1) longer effective sequences (bytes are ~4× longer than BPE tokens); (2) no linguistic priors baked in by tokenization; (3) limited receptive field in byte space. This gap is not fundamental — it narrows at larger scales and may reverse at very long sequences where O(n²) attention becomes prohibitive.</p>
+
+  <h3>6.2 Why VECTOR's Gate Failed</h3>
+  <p>The gate collapse has a specific fixable cause: the loss landscape creates an equilibrium at "keep everything." The hinge budget loss provides no gradient once T_eff ≤ C_target, while L_pred's gradient always favors keeping more information. A two-sided penalty (e.g., (T_eff - C_target)²) or entropy bonus should break this equilibrium.</p>
+
+  <h3>6.3 Honest Assessment</h3>
+  <div class="insight-box">
+    <div class="title">Key Takeaways</div>
+    <ol>
+      <li><strong>Stream validates that token-free byte-level SSM language modeling converges</strong> — this was not a given</li>
+      <li><strong>The Transformer still wins on loss at matched parameter counts</strong> — Stream's value is O(n) complexity, not superior loss at small scale</li>
+      <li><strong>Stream's O(n) advantage is structurally correct but empirically unvalidated</strong> — needs a CUDA scan kernel for fair comparison</li>
+      <li><strong>VECTOR's multi-objective approach needs further tuning</strong> — gate collapse is a fixable optimization landscape issue</li>
+    </ol>
+  </div>
+</section>
+
+<!-- Test Report -->
+<section id="testreport" class="section">
+  <h2>7. Smoke Test Report</h2>
+  <p>Two smoke test runs comparing VECTOR v1 (bugged gate bypass — gate was actually pruning randomly) vs v2 (fixed bypass — true no-op). Both runs: VECTOR 14.58M params, TinyStories dataset (vocab 50,257), batch_size=1, block_size=256, 200 iterations, CPU.</p>
+
+  <div class="grid-2">
+    <div>
+      <div class="card">
+        <div class="card-title">Smoke Test v1 — Bugged Gate</div>
+        <table>
+          <thead><tr><th>Metric</th><th>Start</th><th>End (iter 200)</th></tr></thead>
+          <tbody>
+            <tr><td>Train Loss</td><td>11.86</td><td>6.15</td></tr>
+            <tr><td>Val Loss</td><td>11.86</td><td>—</td></tr>
+            <tr><td>T_eff</td><td>115</td><td>253</td></tr>
+            <tr><td>Time/iter</td><td>3196ms</td><td>655ms</td></tr>
+            <tr><td>Active Ratio (cr)</td><td>0.45</td><td>0.99</td></tr>
+          </tbody>
+        </table>
+        <div class="note" style="margin-top: 0.5rem;"><span class="status-badge fail">BUG</span> Gate was randomly pruning through untrained weights — misleading baseline</div>
+      </div>
+      <div class="test-block">
+        <div class="test-header">
+          <span class="test-name">v1 Training Log (excerpt)</span>
+          <span class="test-meta">steps 0-200</span>
+        </div>
+        <div class="log-container">
+<div class="log-line val">step 0: train loss 11.8657, val loss 11.8637</div>
+<div class="log-line iter">iter 0: loss 11.1427, time 3195.84ms, T_eff=115.0, cr=0.45</div>
+<div class="log-line iter">iter 1: loss 11.1278, time 1565.87ms, T_eff=121.0, cr=0.47</div>
+<div class="log-line iter">iter 2: loss 11.1345, time 1602.63ms, T_eff=109.0, cr=0.43</div>
+<div class="log-line iter">iter 3: loss 11.0856, time 1644.06ms, T_eff=112.0, cr=0.44</div>
+<div class="log-line iter">iter 10: loss 10.9341, time 1583.72ms, T_eff=106.0, cr=0.41</div>
+<div class="log-line iter">iter 20: loss 10.7400, time 1848.16ms, T_eff=118.0, cr=0.46</div>
+<div class="log-line iter">iter 30: loss 10.4792, time 1580.94ms, T_eff=116.0, cr=0.45</div>
+<div class="log-line iter">iter 50: loss 9.5738, time 1956.57ms, T_eff=134.0, cr=0.52</div>
+<div class="log-line iter">iter 77: loss 7.4928, time 1694.55ms, T_eff=199.0, cr=0.78</div>
+<div class="log-line iter">iter 87: loss 6.9139, time 1984.62ms, T_eff=219.0, cr=0.86</div>
+<div class="log-line iter">iter 98: loss 6.4923, time 1598.86ms, T_eff=242.0, cr=0.95</div>
+<div class="log-line iter">iter 100: loss 6.7711, time 2429.06ms, T_eff=236.0, cr=0.92</div>
+<div class="log-line iter">iter 120: loss 5.9707, time 1553.80ms, T_eff=254.0, cr=0.99</div>
+<div class="log-line iter">iter 150: loss 5.7049, time 1866.39ms, T_eff=256.0, cr=1.00</div>
+<div class="log-line val" style="color:var(--yellow);">iter 200: loss 6.1484, time 655.48ms, T_eff=253.0, cr=0.99</div>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="card">
+        <div class="card-title">Smoke Test v2 — Fixed Bypass</div>
+        <table>
+          <thead><tr><th>Metric</th><th>Start</th><th>End (iter 200)</th></tr></thead>
+          <tbody>
+            <tr><td>Train Loss</td><td>10.85</td><td>6.20</td></tr>
+            <tr><td>Val Loss</td><td>10.85</td><td>—</td></tr>
+            <tr><td>T_eff</td><td>256</td><td>256</td></tr>
+            <tr><td>Time/iter</td><td>1479ms</td><td>652ms</td></tr>
+            <tr><td>Active Ratio (cr)</td><td>1.00</td><td>1.00</td></tr>
+          </tbody>
+        </table>
+        <div class="note" style="margin-top: 0.5rem;"><span class="status-badge pass">FIXED</span> True gate bypass — T_eff=256 always, 2.4× faster than v1</div>
+      </div>
+      <div class="test-block">
+        <div class="test-header">
+          <span class="test-name">v2 Training Log (excerpt)</span>
+          <span class="test-meta">steps 0-200</span>
+        </div>
+        <div class="log-container">
+<div class="log-line val">step 0: train loss 10.8522, val loss 10.8484</div>
+<div class="log-line iter">iter 0: loss 10.8563, time 1478.68ms, T_eff=256.0, cr=1.00</div>
+<div class="log-line iter">iter 1: loss 10.8633, time 762.39ms, T_eff=256.0, cr=1.00</div>
+<div class="log-line iter">iter 2: loss 10.8799, time 620.56ms, T_eff=256.0, cr=1.00</div>
+<div class="log-line iter">iter 10: loss 10.6841, time 641.71ms, T_eff=256.0, cr=1.00</div>
+<div class="log-line iter">iter 20: loss 10.4681, time 827.00ms, T_eff=256.0, cr=1.00</div>
+<div class="log-line iter">iter 30: loss 10.2402, time 639.97ms, T_eff=256.0, cr=1.00</div>
+<div class="log-line iter">iter 50: loss 9.4473, time 664.88ms, T_eff=256.0, cr=1.00</div>
+<div class="log-line iter">iter 75: loss 7.9037, time 727.73ms, T_eff=256.0, cr=1.00</div>
+<div class="log-line iter">iter 100: loss 6.4500, time 646.86ms, T_eff=256.0, cr=1.00</div>
+<div class="log-line iter">iter 125: loss 6.2778, time 648.50ms, T_eff=256.0, cr=1.00</div>
+<div class="log-line iter">iter 150: loss 6.1041, time 614.88ms, T_eff=256.0, cr=1.00</div>
+<div class="log-line iter">iter 175: loss 6.8282, time 672.79ms, T_eff=256.0, cr=1.00</div>
+<div class="log-line val" style="color:var(--green);">iter 200: loss 6.2029, time 652.42ms, T_eff=256.0, cr=1.00</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Smoke Test Summary</div>
+    <table>
+      <thead><tr><th>Run</th><th>Config</th><th>Final Loss</th><th>T_eff</th><th>Time/iter (avg)</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td>v1</td><td>hard=False (bugged)</td><td>6.15</td><td>110-256</td><td>~1600ms</td><td>Real pruning from random IG-MLP — misleading</td></tr>
+        <tr><td>v2</td><td>hard=False (fixed)</td><td>6.20</td><td>256</td><td>~650ms</td><td>True ungated baseline — 2.4× faster</td></tr>
+      </tbody>
+    </table>
+    <div class="test-stats" style="margin-top: 0.75rem;">
+      <span>Lower initial loss (10.85 vs 11.86) because no random zeroing destroys information</span>
+    </div>
+  </div>
+</section>
+
+<!-- References -->
+<section id="references" class="section">
+  <h2>References</h2>
+  <ol class="references">
+    <li>Vaswani, A., et al. (2017). Attention Is All You Need. NeurIPS.</li>
+    <li>Gu, A., Goel, K., & Ré, C. (2021). Efficiently Modeling Long Sequences with Structured State Spaces. NeurIPS.</li>
+    <li>Gu, A., & Dao, T. (2023). Mamba: Linear-Time Sequence Modeling with Selective State Spaces.</li>
+    <li>Dao, T., & Gu, A. (2024). Mamba-2: State Space Duality and the Mamba-2 Architecture.</li>
+    <li>Xue, L., et al. (2021). ByT5: Towards a Token-Free Future with Pre-trained Byte-to-Byte Models.</li>
+    <li>Clark, J. H., et al. (2022). CANINE: Pre-training an Efficient Tokenization-Free Encoder for Language Representation.</li>
+    <li>Yu, L., et al. (2023). MegaByte: Predicting Million-byte Sequences with Multiscale Transformers.</li>
+    <li>Shazeer, N., et al. (2017). Outrageously Large Neural Networks: The Sparsely-Gated Mixture-of-Experts Layer.</li>
+    <li>Fedus, W., Zoph, B., & Shazeer, N. (2021). Switch Transformers: Scaling to Trillion Parameter Models with Simple and Efficient Sparsity.</li>
+    <li>Ainslie, J., et al. (2023). GQA: Training Generalized Multi-Query Transformer Models from Multi-Head Checkpoints.</li>
+    <li>Bengio, Y., Léonard, N., & Courville, A. (2013). Estimating or Propagating Gradients Through Stochastic Neurons for Conditional Computation.</li>
+    <li>Karpathy, A. (2023). nanoGPT: The simplest, fastest repository for training/finetuning medium-sized GPTs.</li>
+  </ol>
+</section>
+
+</div>
+</div>
+
+<footer>
+  Stream / VECTOR Research Report &middot; July 2026 &middot; <a href="moe.html" style="color: var(--text2);">MoE-Stream Detail</a>
+</footer>
+
+</div>
+</body>
+</html>

@@ -1,0 +1,24 @@
+.DS_Store
+.idea
+.ipynb_checkpoints/
+.vscode
+__pycache__/
+*.bin
+*.pkl
+*.pt
+*.pyc
+input.txt
+env/
+.venv/
+out_*/
+VECTOR/.venv/
+VECTOR/__pycache__/
+nanoGPT/__pycache__/
+nanoGPT/.git/
+smoke_test*.log
+
+# Output / checkpoint directories
+**/out*/
+
+# Large data files
+**/data/**/*.txt
