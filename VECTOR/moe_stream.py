@@ -160,6 +160,8 @@ class MoEFFN(nn.Module):
         self.register_buffer('_n_replacements', torch.zeros(config.n_experts, dtype=torch.long))
         self.register_buffer('_exploration_bias', torch.zeros(config.n_experts))
         self.register_buffer('_grad_norm_ema', torch.zeros(1))
+        # Optimizer reference (set externally for state clearing on replacement)
+        self._optimizer: Optional[torch.optim.Optimizer] = None
 
         # Gradient-based impact tracking (backward hooks on each expert's last Linear)
         self._saved_outputs: List[Optional[torch.Tensor]] = [None] * config.n_experts
@@ -280,17 +282,29 @@ class MoEFFN(nn.Module):
     def get_value_scores(self, include_birth_boost: bool = True) -> torch.Tensor:
         """Returns value_score per expert. High = valuable. Low = replacement candidate.
 
+        Uses empirical-Bayes shrinkage to handle the low-frequency confidence problem:
+        when an expert has few samples, its score is shrunk toward the population mean.
+        Prevents "expert that got lucky twice" from being mistaken for "rare but valuable."
+
         If include_birth_boost is True, recently-replaced experts get a temporary
         score bonus to prevent immediate re-death.
         """
         freq = self._freq_ema
         impact = self._grad_impact()
-        value = impact / (freq + 1e-8)
+        n = self._total_tokens.float()
+
+        # Empirical-Bayes shrinkage: estimate confidence from sample count
+        # Prior strength: at 5000 tokens, shrinkage ≈ 50%; at 50000, ≈ 10%
+        prior_strength = self.min_tokens
+        shrinkage = n / (n + prior_strength)
+        # Population mean as the prior target
+        population_mean = impact.sum() / (freq.sum() + 1e-8)
+        # Shrunk estimate: less shrinkage when more data, more shrinkage when less
+        impact_shrunk = shrinkage * (impact / (freq + 1e-8)) + (1 - shrinkage) * population_mean
+        value = impact_shrunk.clamp(min=0.0)
 
         if include_birth_boost:
-            # Birth-age weighting: protect experts that were recently replaced
-            age = self._total_tokens.float() / self.min_tokens  # 0 = newborn, 1+ = mature
-            # Survival bonus: value up to 0.35 at birth, decays to 0 at 2× min_tokens
+            age = self._total_tokens.float() / self.min_tokens
             survival_bonus = torch.clamp(2.0 - age, min=0.0) / 2.0 * 0.35
             value = value + survival_bonus
 
@@ -310,6 +324,8 @@ class MoEFFN(nn.Module):
         """
         if threshold is None:
             threshold = self.replacement_threshold
+        if threshold < 0:
+            return []
         scores = self.get_value_scores(include_birth_boost=True)
         # Adaptive per-layer threshold: use max(global_threshold, max_score * 0.05)
         adaptive_th = max(threshold, scores.max().item() * 0.05)
@@ -333,7 +349,8 @@ class MoEFFN(nn.Module):
         """
         Replace expert idx by cloning the best-performing expert + small noise.
         Falls back to scaled random init if no good source exists.
-        Resets tracking stats and boosts routing probability for exploration.
+        Resets tracking stats, clears AdamW momentum buffers for the replaced
+        parameters, and boosts routing probability for exploration.
         """
         # Find best expert to clone from
         scores = self.get_value_scores(include_birth_boost=False)
@@ -341,24 +358,26 @@ class MoEFFN(nn.Module):
         if best_idx == idx:
             best_idx = (best_idx + 1) % self.n_experts
 
-        # Check if the best expert has meaningful value; fall back to random if all are dead
         best_score = scores[best_idx].item()
+        old_params = []
         if best_score > 0.05:
-            # Clone best expert's weights with small Gaussian noise
             noise_std = 0.01
             for target_layer, source_layer in zip(self.experts[idx], self.experts[best_idx]):
                 if isinstance(target_layer, nn.Linear) and isinstance(source_layer, nn.Linear):
+                    old_params.append(target_layer.weight)
                     noise = torch.randn_like(target_layer.weight) * noise_std
                     target_layer.weight.copy_(source_layer.weight + noise)
                     if target_layer.bias is not None and source_layer.bias is not None:
+                        old_params.append(target_layer.bias)
                         noise_b = torch.randn_like(target_layer.bias) * noise_std
                         target_layer.bias.copy_(source_layer.bias + noise_b)
         else:
-            # All experts are dead; use scaled random init with small variance
             for layer in self.experts[idx]:
                 if isinstance(layer, nn.Linear):
+                    old_params.append(layer.weight)
                     nn.init.normal_(layer.weight, mean=0.0, std=0.005)
                     if layer.bias is not None:
+                        old_params.append(layer.bias)
                         nn.init.zeros_(layer.bias)
 
         # Reset tracking stats
@@ -370,6 +389,15 @@ class MoEFFN(nn.Module):
 
         # Boost exploration: router will temporarily prefer this expert
         self._exploration_bias[idx] = 0.2
+
+        # Clear AdamW optimizer state for replaced parameters.
+        # Without this, stale momentum from the old expert corrupts the new expert's
+        # first gradient steps, sending it far from its freshly-cloned initialization.
+        if self._optimizer is not None:
+            for group in self._optimizer.param_groups:
+                for p in group['params']:
+                    if p in old_params and id(p) in self._optimizer.state:
+                        del self._optimizer.state[id(p)]
 
     @torch.no_grad()
     def log_utilization(self, prefix: str = "") -> str:
@@ -527,6 +555,9 @@ class MoEStream(nn.Module):
         use_fused = fused_available and device_type == 'cuda'
         extra_args = dict(fused=True) if use_fused else dict()
         optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, **extra_args)
+        # Store optimizer reference in each MoE block for state clearing on expert replacement
+        for block in self.blocks:
+            block.moe._optimizer = optimizer
         return optimizer
 
     def _post_backward_lifecycle(self):
