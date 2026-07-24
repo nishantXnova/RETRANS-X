@@ -20,6 +20,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from dataclasses import dataclass, field
 from typing import Optional, Tuple, List, Dict
+from model import parallel_ssm_scan
 
 
 @dataclass
@@ -92,17 +93,8 @@ class SSMBlock(nn.Module):
         return self.ln(out + x)
 
     def _ssm_scan(self, u, dt, A, B, C):
-        B_s, T_s, H = u.shape
-        N_state = self.ssm_d_state
-        D_vec = self.D
-        h = torch.zeros(B_s, H, N_state, device=u.device, dtype=u.dtype)
-        a_t = torch.exp(dt.unsqueeze(-1) * A.unsqueeze(0).unsqueeze(0))
-        b_t = dt.unsqueeze(-1) * B.unsqueeze(2) * u.unsqueeze(-1)
-        out = torch.zeros_like(u)
-        for t in range(T_s):
-            h = h * a_t[:, t] + b_t[:, t]
-            out[:, t, :] = (h * C[:, t, :].unsqueeze(1)).sum(-1) + D_vec * u[:, t, :]
-        return out
+        y, _ = parallel_ssm_scan(u, dt, A, B, C, self.D)
+        return y
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +163,8 @@ class MoEFFN(nn.Module):
 
         # Exploration bias decay per training step
         self._exploration_decay = 0.99
+        # Protection period: steps after birth during which expert cannot be killed
+        self._protection_steps: int = 200
 
     def _register_impact_hooks(self):
         """Register backward hooks on each expert's last Linear to capture ∂L/∂y."""
@@ -331,6 +325,10 @@ class MoEFFN(nn.Module):
         adaptive_th = max(threshold, scores.max().item() * 0.05)
         candidates = []
         for i in range(self.n_experts):
+            # Protection period: recently-replaced experts cannot be killed
+            age_steps = self._current_step - self._birth_step[i]
+            if age_steps < self._protection_steps:
+                continue
             if scores[i] < adaptive_th and self._total_tokens[i] >= self.min_tokens:
                 candidates.append(i)
         # Never kill the best expert
@@ -394,10 +392,10 @@ class MoEFFN(nn.Module):
         # Without this, stale momentum from the old expert corrupts the new expert's
         # first gradient steps, sending it far from its freshly-cloned initialization.
         if self._optimizer is not None:
-            for group in self._optimizer.param_groups:
-                for p in group['params']:
-                    if p in old_params and id(p) in self._optimizer.state:
-                        del self._optimizer.state[id(p)]
+            old_ids = {id(p) for p in old_params}
+            for p_state in list(self._optimizer.state.keys()):
+                if id(p_state) in old_ids:
+                    del self._optimizer.state[p_state]
 
     @torch.no_grad()
     def log_utilization(self, prefix: str = "") -> str:

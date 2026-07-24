@@ -19,6 +19,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from dataclasses import dataclass
 from typing import Optional, Tuple
+from model import parallel_ssm_scan
 
 
 @dataclass
@@ -145,17 +146,7 @@ class SSMBlock_VECTOR(nn.Module):
         return self.ln(out + x)
 
     def _ssm_scan(self, u, dt, A, B, C):
-        B_s, T_s, H = u.shape
-        N_state = self.ssm_d_state
-        D_vec = self.D
-        h = torch.zeros(B_s, H, N_state, device=u.device, dtype=u.dtype)
-        a_t = torch.exp(dt.unsqueeze(-1) * A.unsqueeze(0).unsqueeze(0))
-        b_t = dt.unsqueeze(-1) * B.unsqueeze(2) * u.unsqueeze(-1)
-        out = torch.zeros_like(u)
-        for t in range(T_s):
-            h = h * a_t[:, t] + b_t[:, t]
-            out[:, t, :] = (h * C[:, t, :].unsqueeze(1)).sum(-1) + D_vec * u[:, t, :]
-        return out, (h.detach(), None)
+        return parallel_ssm_scan(u, dt, A, B, C, self.D)
 
 
 class AtomAttention(nn.Module):

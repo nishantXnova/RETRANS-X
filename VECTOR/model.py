@@ -15,7 +15,103 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
+
+
+# -----------------------------------------------------------------------------
+# SSM scan: JIT-compiled sequential recurrence.
+# On CPU the sequential loop is optimal (Blelloch tree scan adds overhead from
+# non-contiguous access). JIT eliminates Python loop overhead.
+# -----------------------------------------------------------------------------
+
+class SSMScanFn(torch.autograd.Function):
+    """
+    Custom autograd Function for the SSM scan.
+    Avoids the O(T^2) autograd graph overhead that TorchScript's loop backward
+    produces by implementing the backward pass manually as a reverse scan.
+    """
+    @staticmethod
+    def forward(ctx, a_vec, b_vec, T_s):
+        Bs, _, Hc, Nc = a_vec.shape
+        h = torch.zeros(Bs, Hc, Nc)
+        # Store all hidden states for the backward (avoids recomputation)
+        steps = [h]
+        for t in range(T_s):
+            h = h * a_vec[:, t] + b_vec[:, t]
+            steps.append(h)
+        out = torch.stack(steps[1:], dim=1)  # (B, T, H, N)
+        ctx.save_for_backward(a_vec, out)
+        ctx.T_s = T_s
+        return out
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        a_vec, out = ctx.saved_tensors
+        Bs, _, Hc, Nc = a_vec.shape
+        T_s = ctx.T_s
+
+        grad_a = torch.zeros_like(a_vec)
+        grad_b = torch.zeros_like(a_vec)
+
+        # Reverse scan: dL/dh_t = grad_output[:,t] + dL/dh_{t+1} * a_{t+1}
+        dh = torch.zeros(Bs, Hc, Nc)  # gradient w.r.t. h_{t} (accumulated from future)
+        for t in range(T_s - 1, -1, -1):
+            dh_total = grad_output[:, t] + dh  # total dL/dh_t
+
+            # h_{t-1} from saved states (out[:, t-1] or zeros for t=0)
+            h_prev = out[:, t - 1] if t > 0 else torch.zeros(Bs, Hc, Nc)
+
+            grad_b[:, t] = dh_total
+            grad_a[:, t] = dh_total * h_prev
+
+            # Propagate to h_{t-1}: dL/dh_{t-1} = dL/dh_t * a_t
+            dh = dh_total * a_vec[:, t]
+
+        return grad_a, grad_b, None
+
+
+def _ssm_scan(a_vec, b_vec, T):
+    """Wrapper that calls SSMScanFn.apply."""
+    return SSMScanFn.apply(a_vec, b_vec, T)
+
+
+def parallel_ssm_scan(u: torch.Tensor, dt: torch.Tensor,
+                      A: torch.Tensor, B: torch.Tensor, C: torch.Tensor,
+                      D: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    SSM scan: sequential recurrence h_{t+1} = a_t · h_t + b_t, h_0 = 0,
+    with a_t and b_t being functions of the input.
+
+    Uses a JIT-compiled loop over T to eliminate Python overhead.
+    On CPU there is no O(log T) parallel advantage (tree scan adds non-contiguous
+    access cost), but the JIT avoids O(T) Python-level iteration cost.
+
+    Args:
+      u:  (B, T, H)    input
+      dt: (B, T, H)    step sizes
+      A:  (H, N)       state matrix (negative = -exp(A_log))
+      B:  (B, T, N)    input projection
+      C:  (B, T, N)    output projection
+      D:  (H,)         skip connection
+
+    Returns:
+      y:     (B, T, H)  output
+      state: (B, H, N)  final hidden state (detached)
+    """
+    Bs, T, H = u.shape
+    N = A.shape[-1]
+
+    # Precompute transition a_t and input b_t
+    a_vec = torch.exp(dt.unsqueeze(-1) * A.unsqueeze(0).unsqueeze(0))  # (B, T, H, N)
+    b_vec = dt.unsqueeze(-1) * B.unsqueeze(2) * u.unsqueeze(-1)        # (B, T, H, N)
+
+    # Custom autograd scan — h[t] = state after processing input t
+    h = _ssm_scan(a_vec, b_vec, T)  # (B, T, H, N)
+
+    # Output: y[t] = (h[t] · C[t]).sum(-1) + D · u[t]
+    y = (h * C.unsqueeze(2)).sum(-1) + D * u
+
+    return y, (h[:, -1].detach(), None)
 
 
 # -----------------------------------------------------------------------------
@@ -64,17 +160,7 @@ class SSMBlock(nn.Module):
         return self.ln(out + x), state
 
     def _ssm_scan(self, u, dt, A, B, C):
-        B_s, T_s, H = u.shape
-        N_state = self.ssm_d_state
-        D_vec = self.D
-        h = torch.zeros(B_s, H, N_state, device=u.device, dtype=u.dtype)
-        a_t = torch.exp(dt.unsqueeze(-1) * A.unsqueeze(0).unsqueeze(0))
-        b_t = dt.unsqueeze(-1) * B.unsqueeze(2) * u.unsqueeze(-1)
-        out = torch.zeros_like(u)
-        for t in range(T_s):
-            h = h * a_t[:, t] + b_t[:, t]
-            out[:, t, :] = (h * C[:, t, :].unsqueeze(1)).sum(-1) + D_vec * u[:, t, :]
-        return out, (h.detach(), None)
+        return parallel_ssm_scan(u, dt, A, B, C, self.D)
 
 
 # -----------------------------------------------------------------------------

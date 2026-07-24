@@ -10,8 +10,10 @@ __pycache__/
 input.txt
 env/
 .venv/
+.venv*/
 out_*/
 VECTOR/.venv/
+VECTOR/.venv*/
 VECTOR/__pycache__/
 nanoGPT/__pycache__/
 nanoGPT/.git/

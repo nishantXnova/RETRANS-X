@@ -1,0 +1,37 @@
+# MoE-Stream: replacement TUNED — gentler lifecycle, longer probation, later start
+model_type = 'moe_stream'
+dataset = 'bytes'
+batch_size = 1
+block_size = 256
+n_embd = 128
+n_layer = 4
+ssm_d_state = 8
+ssm_d_conv = 4
+ssm_expand = 2
+n_predict = 4
+n_experts = 4
+top_k = 2
+expert_hidden_mult = 4
+dropout = 0.0
+bias = False
+importance_momentum = 0.99
+replacement_threshold = 0.01           # Lower threshold = harder to be "dead"
+expert_min_tokens = 50000              # ~200 iters before eligible for replacement
+moe_balance_coeff = 0.02
+replace_experts_interval = 1000        # Only check once or twice
+learning_rate = 6e-4
+max_iters = 2000
+weight_decay = 1e-1
+beta1 = 0.9
+beta2 = 0.95
+grad_clip = 1.0
+decay_lr = True
+warmup_iters = 200
+lr_decay_iters = 2000
+min_lr = 6e-5
+dtype = 'float32'
+compile = False
+eval_interval = 1000
+log_interval = 10
+always_save_checkpoint = False
+out_dir = 'out_moe_stream_tuned'
