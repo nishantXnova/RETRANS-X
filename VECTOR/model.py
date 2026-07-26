@@ -15,7 +15,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from dataclasses import dataclass
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, TYPE_CHECKING
 
 
 # -----------------------------------------------------------------------------
@@ -24,22 +24,44 @@ from typing import Optional, Tuple, List
 # non-contiguous access). JIT eliminates Python loop overhead.
 # -----------------------------------------------------------------------------
 
+# ── JIT-compiled forward/backward scan loops ───────────────────────
+# TorchScript fuses the per-step elementwise ops into a single CUDA kernel,
+# eliminating the O(T) kernel-launch overhead from the Python loop.
+
+@torch.jit.script
+def _ssm_fwd(a_vec: torch.Tensor, b_vec: torch.Tensor, T_s: int) -> torch.Tensor:
+    Bs, _, Hc, Nc = a_vec.shape
+    h = torch.zeros(Bs, Hc, Nc, device=a_vec.device)
+    out = torch.empty(Bs, T_s, Hc, Nc, device=a_vec.device)
+    for t in range(T_s):
+        h = h * a_vec[:, t] + b_vec[:, t]
+        out[:, t] = h
+    return out
+
+@torch.jit.script
+def _ssm_bwd(grad_output: torch.Tensor, a_vec: torch.Tensor,
+             out: torch.Tensor) -> List[torch.Tensor]:
+    Bs, T_s, Hc, Nc = a_vec.shape
+    grad_a = torch.zeros_like(a_vec); grad_b = torch.zeros_like(a_vec)
+    dh = torch.zeros(Bs, Hc, Nc, device=a_vec.device)
+    for t in range(T_s - 1, -1, -1):
+        dh_total = grad_output[:, t] + dh
+        h_prev = out[:, t - 1] if t > 0 else torch.zeros(Bs, Hc, Nc, device=a_vec.device)
+        grad_b[:, t] = dh_total; grad_a[:, t] = dh_total * h_prev
+        dh = dh_total * a_vec[:, t]
+    return [grad_a, grad_b]
+
 class SSMScanFn(torch.autograd.Function):
     """
-    Custom autograd Function for the SSM scan.
-    Avoids the O(T^2) autograd graph overhead that TorchScript's loop backward
-    produces by implementing the backward pass manually as a reverse scan.
+    Custom autograd Function wrapping JIT-compiled scan kernels.
+    The JIT-compiled forward/backward loops are fused into single CUDA
+    kernels, eliminating per-step Python overhead and most kernel-launch
+    overhead. The custom backward avoids building the full O(T) autograd
+    graph that PyTorch would construct from the loop.
     """
     @staticmethod
     def forward(ctx, a_vec, b_vec, T_s):
-        Bs, _, Hc, Nc = a_vec.shape
-        h = torch.zeros(Bs, Hc, Nc)
-        # Store all hidden states for the backward (avoids recomputation)
-        steps = [h]
-        for t in range(T_s):
-            h = h * a_vec[:, t] + b_vec[:, t]
-            steps.append(h)
-        out = torch.stack(steps[1:], dim=1)  # (B, T, H, N)
+        out = _ssm_fwd(a_vec, b_vec, T_s)
         ctx.save_for_backward(a_vec, out)
         ctx.T_s = T_s
         return out
@@ -47,26 +69,7 @@ class SSMScanFn(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         a_vec, out = ctx.saved_tensors
-        Bs, _, Hc, Nc = a_vec.shape
-        T_s = ctx.T_s
-
-        grad_a = torch.zeros_like(a_vec)
-        grad_b = torch.zeros_like(a_vec)
-
-        # Reverse scan: dL/dh_t = grad_output[:,t] + dL/dh_{t+1} * a_{t+1}
-        dh = torch.zeros(Bs, Hc, Nc)  # gradient w.r.t. h_{t} (accumulated from future)
-        for t in range(T_s - 1, -1, -1):
-            dh_total = grad_output[:, t] + dh  # total dL/dh_t
-
-            # h_{t-1} from saved states (out[:, t-1] or zeros for t=0)
-            h_prev = out[:, t - 1] if t > 0 else torch.zeros(Bs, Hc, Nc)
-
-            grad_b[:, t] = dh_total
-            grad_a[:, t] = dh_total * h_prev
-
-            # Propagate to h_{t-1}: dL/dh_{t-1} = dL/dh_t * a_t
-            dh = dh_total * a_vec[:, t]
-
+        grad_a, grad_b = _ssm_bwd(grad_output, a_vec, out)
         return grad_a, grad_b, None
 
 

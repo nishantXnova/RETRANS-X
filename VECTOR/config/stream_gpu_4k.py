@@ -1,0 +1,25 @@
+# Stream GPU — 4L/128D, T=4096, batch=4
+dataset = 'bytes'
+batch_size = 4
+block_size = 4096
+n_embd = 128
+n_layer = 4
+ssm_d_state = 8
+n_predict = 4
+learning_rate = 6e-4
+max_iters = 500
+weight_decay = 1e-1
+beta1 = 0.9
+beta2 = 0.95
+grad_clip = 1.0
+decay_lr = True
+warmup_iters = 50
+lr_decay_iters = 500
+min_lr = 6e-5
+device = 'cuda'
+dtype = 'float32'
+compile = False
+eval_interval = 250
+log_interval = 10
+always_save_checkpoint = False
+out_dir = 'out_stream_gpu_4k'

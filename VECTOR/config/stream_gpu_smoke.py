@@ -1,0 +1,25 @@
+# Stream GPU smoke — T=256, batch=4, quick check
+dataset = 'bytes'
+batch_size = 4
+block_size = 256
+n_embd = 128
+n_layer = 4
+ssm_d_state = 8
+n_predict = 4
+learning_rate = 6e-4
+max_iters = 50
+weight_decay = 1e-1
+beta1 = 0.9
+beta2 = 0.95
+grad_clip = 1.0
+decay_lr = True
+warmup_iters = 10
+lr_decay_iters = 50
+min_lr = 6e-5
+device = 'cuda'
+dtype = 'float32'
+compile = False
+eval_interval = 50
+log_interval = 1
+always_save_checkpoint = False
+out_dir = 'out_stream_gpu_smoke'
