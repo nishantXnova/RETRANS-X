@@ -33,8 +33,8 @@ def prepare_bytes(input_path: str, train_frac: float = 0.99):
 
     # Split into train/val
     split = int(len(byte_data) * train_frac)
-    train_bytes = np.array(list(byte_data[:split]), dtype=np.uint8)
-    val_bytes = np.array(list(byte_data[split:]), dtype=np.uint8)
+    train_bytes = np.frombuffer(byte_data[:split], dtype=np.uint8).copy()
+    val_bytes = np.frombuffer(byte_data[split:], dtype=np.uint8).copy()
 
     print(f"Train bytes: {len(train_bytes):,}")
     print(f"Val bytes: {len(val_bytes):,}")
