@@ -23,12 +23,9 @@ def prepare_bytes(input_path: str, train_frac: float = 0.99):
     if not os.path.exists(input_path):
         raise FileNotFoundError(f"Input file not found: {input_path}")
 
-    print(f"Reading text from {input_path}...")
-    with open(input_path, 'r', encoding='utf-8') as f:
-        text = f.read()
-
-    # Convert to UTF-8 bytes
-    byte_data = text.encode('utf-8')
+    print(f"Reading bytes from {input_path}...")
+    with open(input_path, 'rb') as f:
+        byte_data = f.read()
     print(f"Total bytes: {len(byte_data):,}")
 
     # Split into train/val
