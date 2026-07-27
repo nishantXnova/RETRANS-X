@@ -16,7 +16,7 @@ Usage (drop-in for _ssm_scan in model.py):
   h = triton_ssm_scan(a_vec, b_vec, T)
 """
 
-import torch
+import torch, importlib.util, os
 
 try:
     import triton
@@ -171,10 +171,13 @@ def triton_ssm_scan(a_vec: torch.Tensor, b_vec: torch.Tensor, T_s: int,
     """
     if not HAS_TRITON or not use_triton:
         try:
-            from model import _ssm_scan as jit_scan
-            return jit_scan(a_vec, b_vec, T_s)
-        except ImportError:
-            raise RuntimeError("Triton not available and JIT fallback import failed.")
+            _dir = os.path.dirname(os.path.abspath(__file__))
+            _spec = importlib.util.spec_from_file_location('_jit_mod', os.path.join(_dir, 'model.py'))
+            _mod = importlib.util.module_from_spec(_spec)
+            _spec.loader.exec_module(_mod)
+            return _mod._ssm_scan(a_vec, b_vec, T_s)
+        except Exception as e:
+            raise RuntimeError("Triton not available and JIT fallback failed.") from e
 
     B, T, H, N = a_vec.shape
     assert T == T_s
@@ -280,10 +283,14 @@ def bench_scan(T=4096, H=128, N=8, B=4, iters=50):
 
     torch.cuda.synchronize()
 
-    # JIT — use triton_ssm_scan with fallback or import directly
+    # JIT — load via importlib to avoid sys.path issues
     try:
-        from model import _ssm_scan as jit_scan
-    except ImportError:
+        _dir = os.path.dirname(os.path.abspath(__file__))
+        _spec = importlib.util.spec_from_file_location('_jit_bench', os.path.join(_dir, 'model.py'))
+        _mod = importlib.util.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        jit_scan = _mod._ssm_scan
+    except Exception:
         jit_scan = None
 
     if jit_scan is not None:
