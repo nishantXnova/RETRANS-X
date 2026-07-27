@@ -170,8 +170,11 @@ def triton_ssm_scan(a_vec: torch.Tensor, b_vec: torch.Tensor, T_s: int,
         h: (B, T, H, N) state after each step
     """
     if not HAS_TRITON or not use_triton:
-        from model import _ssm_scan as jit_scan
-        return jit_scan(a_vec, b_vec, T_s)
+        try:
+            from model import _ssm_scan as jit_scan
+            return jit_scan(a_vec, b_vec, T_s)
+        except ImportError:
+            raise RuntimeError("Triton not available and JIT fallback import failed.")
 
     B, T, H, N = a_vec.shape
     assert T == T_s
@@ -277,13 +280,21 @@ def bench_scan(T=4096, H=128, N=8, B=4, iters=50):
 
     torch.cuda.synchronize()
 
-    # JIT
-    from model import _ssm_scan as jit_scan
-    start = time.perf_counter()
-    for _ in range(iters):
-        h_jit = jit_scan(a, b, T)
-    torch.cuda.synchronize()
-    jit_ms = (time.perf_counter() - start) / iters * 1000
+    # JIT — use triton_ssm_scan with fallback or import directly
+    try:
+        from model import _ssm_scan as jit_scan
+    except ImportError:
+        jit_scan = None
+
+    if jit_scan is not None:
+        start = time.perf_counter()
+        for _ in range(iters):
+            h_jit = jit_scan(a, b, T)
+        torch.cuda.synchronize()
+        jit_ms = (time.perf_counter() - start) / iters * 1000
+    else:
+        jit_ms = float('nan')
+        h_jit = None
 
     # Triton
     start = time.perf_counter()
@@ -293,12 +304,17 @@ def bench_scan(T=4096, H=128, N=8, B=4, iters=50):
     tri_ms = (time.perf_counter() - start) / iters * 1000
 
     # Verify correctness
-    diff = (h_jit - h_tri).abs().max().item()
+    if h_jit is not None:
+        diff = (h_jit - h_tri).abs().max().item()
+    else:
+        diff = float('nan')
 
     print(f"T={T} H={H} N={N} B={B}")
-    print(f"  JIT:    {jit_ms:.2f}ms")
+    if jit_scan is not None:
+        print(f"  JIT:    {jit_ms:.2f}ms")
     print(f"  Triton: {tri_ms:.2f}ms")
-    print(f"  Speedup: {jit_ms / tri_ms:.2f}x")
+    if jit_scan is not None:
+        print(f"  Speedup: {jit_ms / tri_ms:.2f}x")
     print(f"  Max diff: {diff:.2e}")
     return jit_ms, tri_ms, diff
 
