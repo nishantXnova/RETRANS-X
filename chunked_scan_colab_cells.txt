@@ -1,0 +1,91 @@
+# ================================================================
+# CHUNKED TRITON SSM SCAN - Colab cells
+# Paste each CELL block below into its own notebook cell (Ctrl+Enter).
+# Runtime: T4 GPU (Runtime > Change runtime type > T4 GPU)
+# ================================================================
+
+
+# ===================== CELL 1 =====================
+# Clone repo + load triton_scan (always pulls latest, run first)
+import sys, os, time
+import numpy as np
+import torch
+
+REPO_URL = 'https://github.com/nishantXnova/RETRANS-X.git'
+PROJECT_DIR = '/content/RETRANS-X'
+VEC_DIR = os.path.join(PROJECT_DIR, 'VECTOR')
+
+if not os.path.isdir(PROJECT_DIR):
+    print('Cloning repo...')
+    !git clone --quiet {REPO_URL} {PROJECT_DIR}
+
+os.chdir(PROJECT_DIR)
+print('Force-updating to origin/main...')
+!git fetch --quiet origin
+!git reset --hard --quiet origin/main
+
+triton_path = os.path.join(VEC_DIR, 'triton_scan.py')
+print(f'triton_scan.py exists: {os.path.isfile(triton_path)}')
+assert os.path.isfile(triton_path), 'triton_scan.py not found after clone/reset'
+
+# Always load the freshly pulled file (drop any stale cached module)
+sys.path.insert(0, VEC_DIR)
+sys.modules.pop('triton_scan', None)
+import triton_scan as ts
+
+print('HAS_TRITON:', ts.HAS_TRITON)
+assert ts.HAS_TRITON, 'Triton not available - use T4 GPU runtime'
+print('Loaded from:', ts.__file__)
+
+
+# ===================== CELL 2 =====================
+# Correctness check (fused first, then chunked)
+ok_fused = ts.check_fused()
+print()
+ok_chunked = ts.check_chunked()
+print()
+print('FINAL:', 'PASS' if (ok_fused and ok_chunked) else 'FAIL')
+
+
+# ===================== CELL 3 =====================
+# Benchmark: chunked vs fused vs old (fwd+bwd)
+print(f'CHUNK_DEFAULT = {ts.CHUNK_DEFAULT}\n')
+ts.bench_chunked(T=4096, H=128, N=8, B=4, iters=20)
+print()
+ts.bench_chunked(T=16384, H=128, N=8, B=4, iters=10)
+
+
+# ===================== CELL 4 =====================
+# Chunk-size sweep (optional): which C_CHUNK is fastest at T=8192?
+import torch, time
+
+device = 'cuda'
+B, T, H, N = 4, 8192, 128, 8
+torch.manual_seed(0)
+u = torch.randn(B, T, H, device=device).requires_grad_()
+dt = (torch.rand(B, T, H, device=device).clamp_min(1e-3) * 0.1).requires_grad_()
+A = (-torch.rand(H, N, device=device).clamp_min(1e-3)).requires_grad_()
+Bp = torch.randn(B, T, N, device=device).requires_grad_()
+C = torch.randn(B, T, N, device=device)
+D = torch.randn(H, device=device)
+
+def run(chunk):
+    h = ts.ChunkedSSMScanFn.apply(u, dt, A, Bp, T, chunk)
+    y = (h * C.unsqueeze(2)).sum(-1) + D * u
+    y.pow(2).mean().backward()
+    for t in (dt, A, Bp):
+        t.grad = None
+
+print(f'T={T} H={H} N={N} B={B}: fwd+bwd per C_CHUNK')
+for chunk in (32, 64, 128, 256, 512, 1024):
+    if T % chunk:
+        continue
+    for _ in range(3):
+        run(chunk)
+    torch.cuda.synchronize()
+    t0 = time.perf_counter()
+    for _ in range(10):
+        run(chunk)
+    torch.cuda.synchronize()
+    ms = (time.perf_counter() - t0) / 10 * 1000
+    print(f'  C_CHUNK={chunk:>4}: {ms:7.2f} ms')
