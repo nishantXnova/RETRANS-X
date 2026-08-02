@@ -904,6 +904,11 @@ def chunked_triton_wrapped_scan(self, u, dt, A, B, C):
 # chunked only adds materialization overhead (0.85-0.87x). Chunk size within a
 # wide range doesn't matter once past the threshold, so CHUNK_DEFAULT=128 is fine.
 AUTO_MIN_T = 32768   # below this, chain depth is cheap -> use fused
+# NOTE: AUTO_MAX_BH is a proxy for fused grid size, and it silently assumes
+# N=8. Fused grid is B*H*ceil(N/BLOCK_N) with BLOCK_N=min(32, next_pow2(N));
+# it collapses to B*H only because N=8 -> BLOCK_N=8 -> ceil(8/8)=1. If N is
+# ever increased, the effective program count changes and this threshold stops
+# meaning what it means today — re-probe the crossover before relying on it.
 AUTO_MAX_BH = 256    # fused programs B*H at/below this -> occupancy-starved -> chunk
 
 

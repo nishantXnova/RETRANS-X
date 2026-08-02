@@ -145,3 +145,26 @@ print(f'Rule: chunked iff T >= {AUTO_MIN_T} and B*H <= {AUTO_MAX_BH} (and T%128=
 for (B, T, H) in [(4, 4096, 128), (4, 16384, 128), (1, 8192, 128),
                   (1, 32768, 128), (1, 65536, 128), (2, 65536, 64)]:
     print(f'  B={B:>2} T={T:>6} H={H:>3} -> {auto_scan_path(B, T, H)}')
+
+
+# ===================== CELL 7 =====================
+# Boundary probes: validate the AUTO_MIN_T / AUTO_MAX_BH thresholds, don't
+# trust the interpolation. Rule predicts:
+#   B=2,H=128,T=32768 (B*H=256, AT the max edge)  -> chunked (T high enough)
+#   B=1,T=16384      (below AUTO_MIN_T)          -> fused
+from triton_scan import bench_chunked
+
+print('=== Probe 1: B=2, H=128, T=32768 (B*H=256, at AUTO_MAX_BH edge) ===')
+bench_chunked(T=32768, H=128, N=8, B=2, iters=10)
+print()
+print('=== Probe 2: B=1, T=16384 (below AUTO_MIN_T) ===')
+bench_chunked(T=16384, H=128, N=8, B=1, iters=10)
+
+
+# ===================== CELL 8 =====================
+# Boundary probe 3 (if probe 1 is ambiguous): B=3, H=128, T=32768 (B*H=384,
+# between the tested 128 and 512). Rule says fused; check whether it is.
+from triton_scan import bench_chunked
+
+print('=== Probe 3 (optional): B=3, H=128, T=32768 (B*H=384, above max edge) ===')
+bench_chunked(T=32768, H=128, N=8, B=3, iters=10)
