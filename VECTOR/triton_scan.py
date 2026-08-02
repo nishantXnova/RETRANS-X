@@ -512,7 +512,7 @@ if HAS_TRITON:
     
         g_base = grad_ptr + pid_b * stride_g_b + pid_h * stride_g_h + n_offs
         d_base = dt_ptr + pid_b * stride_d_b + pid_h * stride_d_h
-        o_base = out_ptr + pid_b * stride_o_b + pid_h * stride_o_h
+        o_base = out_ptr + pid_b * stride_o_b + pid_h * stride_o_h + n_offs
         gs_base = g_ds_ptr + pid_b * stride_gs_b + pid_h * stride_gs_h + n_offs
         gb_base = g_b_ptr + pid_b * stride_gb_b + pid_h * stride_gb_h + n_offs
     
