@@ -218,3 +218,58 @@ for mode, B, T in rows:
     ms = results[(mode, B, T)][0]
     print(f'  {mode} T={T} B={B}: {jit_ms/ms:.2f}x')
 print('\nPaste the ms/iter + tok/s rows into index.html §5.4 and drop the stale warning.')
+
+
+# ===================== CELL 10 =====================
+# HOTFIX (Colab doesn't get new commits): the shipped auto wrapper shadowed its
+# own B argument (input-projection tensor) with 'B, T, H = u.shape', passing the
+# batch-size int into the kernels -> "'int' object has no attribute 'stride'".
+# Patched version below renames it to Bs. enable_triton reads the wrapper as a
+# module global at call time, so reassigning ts.auto_triton_wrapped_scan is
+# enough — no need to re-pull the repo. Run BEFORE any auto=True call.
+def _auto_scan_fixed(self, u, dt, A, B, C):
+    D = self.D.to(u.dtype)
+    Bs, T, H = u.shape
+    path = ts.auto_scan_path(Bs, T, H)
+    if getattr(ts, 'AUTO_TRACE', False):
+        ts.AUTO_PATH_LOG.append((Bs, T, H, path))
+    if path == 'chunked':
+        h = ts.ChunkedSSMScanFn.apply(u, dt, A, B, T, ts.CHUNK_DEFAULT)
+    else:
+        h = ts.FusedSSMScanFn.apply(u, dt, A, B, T)
+    y = (h * C.unsqueeze(2)).sum(-1) + D * u
+    return y, (h[:, -1].detach(), None)
+
+ts.auto_triton_wrapped_scan = _auto_scan_fixed
+print('patched ts.auto_triton_wrapped_scan (B-shadowing fix applied)')
+
+# Verify the fixed wrapper in both dispatch regimes (B*H=128 chunked, B*H=256 fused).
+class _Stub(torch.nn.Module):
+    pass
+stub = _Stub()
+stub.D = torch.randn(64, device='cuda')
+ok = True
+for B in (2, 4):
+    T, H, N = 1024, 64, 8
+    label = 'chunked' if ts.auto_scan_path(B, T, H) == 'chunked' else 'fused'
+    torch.manual_seed(0)
+    u = torch.randn(B, T, H, device='cuda'); u.requires_grad_()
+    dt = torch.rand(B, T, H, device='cuda').clamp_min(1e-3) * 0.1; dt.requires_grad_()
+    A = -torch.rand(H, N, device='cuda').clamp_min(1e-3); A.requires_grad_()
+    Bp = torch.randn(B, T, N, device='cuda'); Bp.requires_grad_()
+    C = torch.randn(B, T, N, device='cuda')
+    y_w, _ = _auto_scan_fixed(stub, u, dt, A, Bp, C)
+    y_w.pow(2).mean().backward()
+    gw = {n: t.grad.clone() for n, t in [('u', u), ('dt', dt), ('A', A), ('B', Bp)]}
+    for t in (u, dt, A, Bp): t.grad = None
+    h_f = ts.FusedSSMScanFn.apply(u, dt, A, Bp, T)
+    y_f = (h_f * C.unsqueeze(2)).sum(-1) + stub.D * u
+    y_f.pow(2).mean().backward()
+    gf = {n: t.grad for n, t in [('u', u), ('dt', dt), ('A', A), ('B', Bp)]}
+    worst = (y_w - y_f).abs().max().item()
+    for n in ('u', 'dt', 'A', 'B'):
+        worst = max(worst, (gw[n] - gf[n]).abs().max().item())
+    ok &= worst < 1e-4
+    print(f'  auto B*H={B*H} -> {label}: worst diff {worst:.2e} {"OK" if worst < 1e-4 else "FAIL"}')
+print('WRAPPER CHECK:', 'PASS' if ok else 'FAIL')
+print('Now re-run CELL 9 for the honest §5.4 timings (auto rows will work).')
