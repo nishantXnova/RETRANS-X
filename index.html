@@ -340,7 +340,7 @@ m_t = STE(s_t &gt; 0.5)</div>
 
   <div class="insight-box" style="border-color:var(--green);">
     <div class="title">Breakthrough: Crossover Confirmed at T≈9k</div>
-    <p>The fused Triton scan kernel delivers <strong>18.8× speedup</strong> over the JIT loop (93ms → 5ms per scan at T=4096). At T=8192, Stream 4L/128D is within <strong>8% of GPT 3L/128D</strong> on wall-time — and will win at T>9000 thanks to O(n) vs O(n²) scaling.</p>
+    <p>The fused Triton scan kernel delivers <strong>18.8× speedup</strong> over the JIT loop (93ms → 5ms per scan at T=4096) — <em>kernel-level only</em>: it measures fusing away Python-driven launch overhead, <em>not</em> end-to-end training time (see §5.4). At T=8192, Stream 4L/128D is within <strong>8% of GPT 3L/128D</strong> on forward-only wall-time. Crossover (O(n) vs O(n²)) is projected at T&gt;9000. The scan remains a serial loop (grid B×H), so a chunked two-level scan and a shape-conditional auto-dispatch rule were added for the occupancy-starved low-B·H regime — see §5.9 for the full arc.</p>
   </div>
 
   <table>
@@ -373,29 +373,33 @@ m_t = STE(s_t &gt; 0.5)</div>
     <div class="card">
       <div class="card-title">Scan Kernel Speedup</div>
       <div class="value">18.8×</div>
-      <div class="note">Triton fused scan vs JIT loop (93ms→5ms)</div>
+      <div class="note">Kernel-level only — fuses away Python launch overhead; not end-to-end training time</div>
     </div>
   </div>
 
   <div class="figure-container">
     <img src="paper/figures/fig4_walltime.png" alt="GPU Wall-Time">
-    <div class="caption"><strong>Figure 4:</strong> GPU wall-time benchmark (Colab T4, B=1). JIT vs Triton vs GPT. The fused Triton kernel collapses Stream's wall-time by 16-22×, bringing it to near-parity with GPT at T=8192. Crossover is visible at T≈9k.</div>
+    <div class="caption"><strong>Figure 4:</strong> Forward-only GPU wall-time benchmark (Colab T4, B=1). JIT vs Triton vs GPT. The fused Triton kernel collapses Stream's forward wall-time by 16-22× vs JIT, bringing it to near-parity with GPT at T=8192. Crossover is projected at T≈9k; end-to-end (fwd+bwd) timings are being re-measured.</div>
   </div>
 
   <h3>5.4 GPU Training Run (Colab T4)</h3>
   <p>Stream 4L/128D (0.85M params) trained on TinyStories bytes. Two runs at T=4096 (B=4) comparing JIT vs Triton scan, plus a T=16384 run (B=2) enabled by the Triton speedup.</p>
 
+  <div class="note" style="border-color:var(--orange);">
+    <strong>⚠ Re-measuring.</strong> The <em>Triton</em> training timings below were logged <strong>before</strong> a missing <code>torch.cuda.synchronize()</code> was fixed — they measured CPU scheduling time, not GPU completion. The <strong>~12 ms/iter, 73×, 1.38M–2.77M tok/s</strong> figures are <strong>stale and unreliable</strong>. End-to-end fwd+bwd is being re-measured with honest timing; this section updates when the rerun completes.
+  </div>
+
   <table>
     <thead><tr><th>Metric</th><th>JIT T=4096</th><th>Triton T=4096</th><th>Triton T=16384</th></tr></thead>
     <tbody>
-      <tr><td>Time per iter</td><td>~875 ms</td><td>~12 ms</td><td>~12 ms</td></tr>
-      <tr><td>Speedup vs JIT</td><td>1×</td><td><strong>73×</strong></td><td><strong>73×</strong></td></tr>
+      <tr><td>Time per iter</td><td>~875 ms</td><td>~12 ms <span style="color:var(--orange);">(stale)</span></td><td>~12 ms <span style="color:var(--orange);">(stale)</span></td></tr>
+      <tr><td>Speedup vs JIT</td><td>1×</td><td><span style="color:var(--orange);">73× (stale)</span></td><td><span style="color:var(--orange);">73× (stale)</span></td></tr>
       <tr><td>Tokens/iter</td><td>16,384</td><td>16,384</td><td>32,768</td></tr>
-      <tr><td>Throughput</td><td>18K tok/s</td><td>1.38M tok/s</td><td><strong>2.77M tok/s</strong></td></tr>
+      <tr><td>Throughput</td><td>18K tok/s</td><td>1.38M tok/s <span style="color:var(--orange);">(stale)</span></td><td>2.77M tok/s <span style="color:var(--orange);">(stale)</span></td></tr>
       <tr><td>Final val loss</td><td>2.36</td><td>2.44</td><td>2.40</td></tr>
     </tbody>
   </table>
-  <div class="note">Losses are within expected batch variance (all ~2.4). The T=16384 run achieves 2.77M tok/s — same cost as T=4096 but processing twice as many tokens per second. O(n) means longer sequences cost linearly, not quadratically. Triton kernel is numerically equivalent to JIT (<2e-4 max diff).</div>
+  <div class="note">Losses are within expected batch variance (all ~2.4). O(n) means longer sequences cost linearly, not quadratically — the asymptotic claim stands, but the <em>absolute</em> training throughput numbers above are stale (see warning). Triton scan is numerically equivalent to JIT (&lt;2e-4 max diff).</div>
 
   <h3>5.5 Stream vs GPT: O(n) vs O(n²) — Full GPU Benchmark</h3>
   <p>Matched ~0.7M parameter models on Colab T4. Stream's throughput is <strong>flat at ~228K tok/s across all sequence lengths</strong> — perfect O(n) scaling. GPT peaks at T=1024 then decays quadratically.</p>
@@ -472,6 +476,22 @@ m_t = STE(s_t &gt; 0.5)</div>
     <img src="paper/figures/fig10_summary_table.png" alt="Summary Table">
     <div class="caption"><strong>Figure 10:</strong> Summary of all experimental results. Stream models from Colab T4 GPU training and scaling runs; nanoGPT baselines from converged CPU runs.</div>
   </div>
+
+  <h3>5.9 Triton Scan Development Arc: From Fake Parallelism to a Measured Dispatch Rule</h3>
+  <p>How the Triton SSM scan went from a nominal speedup to a benchmarked, shape-conditional kernel. Every threshold below is backed by measured T4 data rather than guesses.</p>
+  <ol>
+    <li><strong>Found two fake-parallelism bugs before writing any new code.</strong> The "fused Triton scan" wasn't actually parallel — <code>grid=(B,H)</code> only, with a sequential Python-loop chain of T dependent FMAs inside each program. Separately, earlier "12ms/iter" logs were fake because the training loop had no <code>torch.cuda.synchronize()</code>, so it was measuring CPU scheduling time, not GPU completion time. Honest timing (with sync) was added first.</li>
+    <li><strong>Diagnosed what the 488ms/iter at T=16384 actually was.</strong> On Colab T4: pure scan forward at T=4096 was 5ms, but full fwd+bwd at T=16384 was 488ms — far more than forward-scan scaling alone predicted, pointing at backward. Turned out backward already had its own fused kernel (not autograd-retraced), but it ran the same eager exp/mul materialization and the same O(T) serial chain in reverse.</li>
+    <li><strong>Fixed the materialization problem first.</strong> Wrote fused forward/backward kernels that compute <span class="math">a_t = exp(dt·A)</span> and <span class="math">b_t = dt·B·u</span> in registers per-step instead of precomputing and storing full <code>(B,T,H,N)</code> <code>a_vec</code>/<code>b_vec</code> tensors (each 536MB at T=65536). Caught and fixed two real bugs in the fused kernel: a <code>tl.ones</code> call that doesn't exist in Triton (fixed to <code>tl.full</code>), and a missing <code>n_offs</code> on a pointer base causing a mask-shape mismatch. Validated the fused path against a pure-PyTorch reference — passed within 1e-4 on all gradients.</li>
+    <li><strong>Discovered the fused kernel had been written but never actually used.</strong> <code>enable_triton(model, True)</code> defaulted to <code>fused=False</code>, so every benchmark and any speedup numbers already in <code>index.html</code>/<code>stream_pipeline.html</code> had been measuring the non-fused path. Fixed the wiring, corrected the stale numbers in both docs, and made <code>enable_triton(fused=True)</code> auto-verify itself at init with a loud fallback rather than trusting it blindly.</li>
+    <li><strong>Built the chunked two-level scan</strong> (chunk-local scan → tiny inter-chunk carry scan → parallel broadcast correction, mirrored in reverse for backward), aiming to fix the remaining O(T) serial-chain/occupancy problem. Backward recomputes intermediate states from chunk-boundary checkpoints instead of storing the full trajectory. Passed correctness checks against both a PyTorch reference and the fused path's gradients.</li>
+    <li><strong>Benchmarked honestly and found chunking didn't help everywhere.</strong> At B=4 (mid-range batch), chunked was actually <em>slower</em> than fused, and a chunk-size sweep was completely flat — meaning chain depth wasn't the bottleneck at that batch size, and chunking's extra materialized tensors plus 3x more kernel launches were pure overhead there.</li>
+    <li><strong>Found the regime where chunking does win: low batch, long sequence.</strong> At B=1, T≥16384 (down to as short as T=4096, it turned out later), chunked beat fused by roughly 1.1–1.35x consistently — the case where fused's low program count leaves the GPU under-occupied.</li>
+    <li><strong>Built a shape-conditional auto-dispatch rule</strong> to pick fused vs. chunked per call rather than hardcoding one path. The first version's thresholds were guessed from just two data points and turned out wrong at 2 of 3 boundary probes — chunked lost where the rule predicted a win, and won where the rule predicted a loss.</li>
+    <li><strong>Ran disambiguation and boundary-pinning experiments to find the real rule</strong>, rather than re-guessing. Confirmed the right predictor is the product <strong>B·H</strong> (not batch size alone — verified by testing two different B/H splits with the same product and getting matching results), found no real sequence-length floor exists (wins held even at T=4096), and pinned the actual ceiling to <strong>B·H≤128</strong> (128 wins, 192 loses).</li>
+    <li><strong>Shipped the corrected rule</strong>: <code>auto_scan_path</code> now picks chunked when <code>B·H≤128</code>, fused otherwise, with no T threshold — fully backed by measured data rather than interpolated guesses, with the fallback chain (chunked→fused→non-fused) still intact for safety.</li>
+  </ol>
+  <div class="note"><strong>Result:</strong> B·H=128 chunked wins 1.15–1.24x over fused at every T from 4096 to 65536; B·H=192 loses (0.96–0.97x). The shipped rule needs no further probing.</div>
 </section>
 
 <!-- MoE-Stream Link -->

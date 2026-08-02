@@ -1,0 +1,495 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Stream — Architecture &amp; Pipeline</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #0b0d12;
+    --panel: #10141d;
+    --panel2: #141a26;
+    --border: #222a3a;
+    --text: #e6e8ee;
+    --muted: #8b93a7;
+    --faint: #5a6375;
+    --emerald: #34d399;
+    --blue: #60a5fa;
+    --violet: #a78bfa;
+    --amber: #f59e0b;
+    --pink: #f472b6;
+    --red: #f87171;
+    --cyan: #22d3ee;
+    --slate: #94a3b8;
+    --mono: 'JetBrains Mono', 'Cascadia Code', Consolas, monospace;
+    --sans: 'Inter', -apple-system, 'Segoe UI', system-ui, sans-serif;
+  }
+  html { scroll-behavior: smooth; }
+  body { font-family: var(--sans); background: var(--bg); color: var(--text); line-height: 1.6; -webkit-font-smoothing: antialiased; }
+  .page { max-width: 1080px; margin: 0 auto; padding: 3rem 1.5rem 4rem; }
+
+  /* header */
+  .head { text-align: center; padding-bottom: 2.2rem; margin-bottom: 2.2rem; border-bottom: 1px solid var(--border); }
+  .head .badge { display: inline-block; font-size: 0.68rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--cyan); border: 1px solid rgba(34,211,238,.35); background: rgba(34,211,238,.08); padding: .25rem .7rem; border-radius: 3px; margin-bottom: 1.1rem; }
+  .head h1 { font-size: 2rem; font-weight: 600; letter-spacing: -0.02em; margin-bottom: .6rem; }
+  .head p { color: var(--muted); font-size: .92rem; max-width: 720px; margin: 0 auto; }
+  .head .mono { font-family: var(--mono); color: var(--violet); }
+
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; margin-bottom: 2.6rem; }
+  @media (max-width: 760px) { .stats { grid-template-columns: repeat(2, 1fr); } }
+  .stat { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 1rem 1.1rem; }
+  .stat .k { font-size: .66rem; text-transform: uppercase; letter-spacing: .1em; color: var(--muted); margin-bottom: .35rem; }
+  .stat .v { font-size: 1.25rem; font-weight: 600; letter-spacing: -.01em; }
+  .stat .n { font-size: .72rem; color: var(--faint); margin-top: .25rem; }
+
+  /* figure blocks */
+  figure { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 1.1rem 1.1rem .9rem; margin: 0 0 2.2rem; overflow: hidden; }
+  figure .svgwrap { overflow-x: auto; }
+  figure svg { display: block; width: 100%; height: auto; }
+  figcaption { font-size: .8rem; color: var(--muted); margin-top: .7rem; }
+  figcaption .src { font-family: var(--mono); font-size: .7rem; color: var(--faint); }
+  figcaption .src a { color: var(--blue); text-decoration: none; }
+  figcaption .src a:hover { text-decoration: underline; }
+
+  .note { background: var(--panel2); border: 1px solid var(--border); border-left: 3px solid var(--amber); border-radius: 8px; padding: .8rem 1rem; margin: 1.2rem 0 2rem; font-size: .82rem; color: var(--muted); }
+  .note b { color: var(--amber); font-weight: 600; }
+
+  footer { border-top: 1px solid var(--border); padding-top: 1.4rem; margin-top: 2rem; color: var(--faint); font-size: .72rem; text-align: center; }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <header class="head">
+    <div class="badge">Architecture Diagram &middot; Model Card</div>
+    <h1>Stream — Continuous Byte-Level State Space Language Model</h1>
+    <p>A <span class="mono">token-free</span>, <span class="mono">position-free</span>, <span class="mono">O(n)</span> language model. No tokenizer. No positional encoding. No quadratic attention. The recurrence <em>is</em> position.</p>
+  </header>
+
+  <div class="stats">
+    <div class="stat"><div class="k">Vocabulary</div><div class="v" style="color:var(--emerald)">256</div><div class="n">raw bytes — the only "tokenizer" is UTF-8</div></div>
+    <div class="stat"><div class="k">Position</div><div class="v" style="color:var(--blue)">SSM scan</div><div class="n">order encoded by the recurrence itself</div></div>
+    <div class="stat"><div class="k">Complexity</div><div class="v" style="color:var(--violet)">O(n)</div><div class="n">linear compute &amp; memory, flat 228K tok/s</div></div>
+    <div class="stat"><div class="k">Best val loss</div><div class="v" style="color:var(--cyan)">1.69</div><div class="n">Stream 6L/256D · 4.43M params (TinyStories bytes)</div></div>
+  </div>
+
+  <!-- ============ FIGURE 1 : SYSTEM PIPELINE ============ -->
+  <figure id="fig1">
+    <div class="svgwrap">
+    <svg viewBox="0 0 980 360" role="img" aria-label="Stream training pipeline">
+      <style>
+        .t{ font-family: var(--sans); }
+        .tt{ font-family: var(--sans); font-weight:600; }
+        .mono{ font-family: var(--mono); }
+        .node-t{ fill:#fff; }
+        .node-s{ fill:#9aa5bd; font-size:11px; }
+        .lbl{ fill:#5a6375; font-size:11px; }
+        .eq{ fill:#f0f2f8; font-size:13px; }
+        .big{ fill:#dbe3f0; font-size:14px; font-weight:600; }
+        .cap{ fill:#8b93a7; font-size:12px; }
+        .chip{ font-size:11.5px; fill:#c7cedb; }
+      </style>
+
+      <text class="tt" x="490" y="24" text-anchor="middle" font-size="15" fill="#e6e8ee">Stream training pipeline — raw bytes in, next bytes out</text>
+
+      <!-- property chips -->
+      <g>
+        <rect x="14" y="42" width="300" height="27" rx="13.5" fill="rgba(52,211,153,.08)" stroke="rgba(52,211,153,.4)"/>
+        <text class="chip" x="164" y="59" text-anchor="middle">token-free &#183; vocab = 256 bytes</text>
+        <rect x="330" y="42" width="330" height="27" rx="13.5" fill="rgba(96,165,250,.08)" stroke="rgba(96,165,250,.4)"/>
+        <text class="chip" x="495" y="59" text-anchor="middle">position-free &#183; recurrence encodes order</text>
+        <rect x="676" y="42" width="290" height="27" rx="13.5" fill="rgba(167,139,250,.08)" stroke="rgba(167,139,250,.4)"/>
+        <text class="chip" x="821" y="59" text-anchor="middle">O(n) scan &#183; no quadratic attention</text>
+      </g>
+
+      <!-- stage 1: raw bytes -->
+      <g>
+        <rect x="14" y="100" width="150" height="64" rx="8" fill="rgba(52,211,153,.10)" stroke="#34d399" stroke-width="1.2"/>
+        <text class="node-t" x="89" y="122" text-anchor="middle" font-size="13" font-weight="600">Raw bytes</text>
+        <text class="node-s" x="89" y="140" text-anchor="middle">b&#8321; b&#8322; &#8230; b&#8340; &#8712; [0,255]</text>
+      </g>
+      <line x1="166" y1="132" x2="203" y2="132" stroke="#34d399" stroke-width="1.6" marker-end="url(#arr)"/>
+      <text class="lbl" x="185" y="124" text-anchor="middle" font-size="10">no tokenizer</text>
+
+      <!-- stage 2: byte embed -->
+      <g>
+        <rect x="206" y="100" width="150" height="64" rx="8" fill="rgba(96,165,250,.10)" stroke="#60a5fa" stroke-width="1.2"/>
+        <text class="node-t" x="281" y="122" text-anchor="middle" font-size="13" font-weight="600">byte_embed</text>
+        <text class="node-s" x="281" y="140" text-anchor="middle">x&#8346; = Embed(b&#8346;) · 256 &#8594; D</text>
+      </g>
+      <line x1="358" y1="132" x2="395" y2="132" stroke="#60a5fa" stroke-width="1.6" marker-end="url(#arr)"/>
+
+      <!-- stage 3: ssm blocks -->
+      <g>
+        <rect x="398" y="100" width="180" height="64" rx="8" fill="rgba(167,139,250,.10)" stroke="#a78bfa" stroke-width="1.2"/>
+        <text class="node-t" x="488" y="122" text-anchor="middle" font-size="13" font-weight="600">SSM blocks</text>
+        <text class="node-s" x="488" y="140" text-anchor="middle">&#215; N_layers · selective scan</text>
+      </g>
+      <line x1="580" y1="132" x2="617" y2="132" stroke="#a78bfa" stroke-width="1.6" marker-end="url(#arr)"/>
+      <text class="lbl" x="599" y="124" text-anchor="middle" font-size="10">recurrence = position</text>
+
+      <!-- stage 4: layernorm -->
+      <g>
+        <rect x="620" y="100" width="80" height="64" rx="8" fill="rgba(148,163,184,.12)" stroke="#94a3b8" stroke-width="1.2"/>
+        <text class="node-t" x="660" y="122" text-anchor="middle" font-size="13" font-weight="600">LN</text>
+        <text class="node-s" x="660" y="140" text-anchor="middle">ln_f</text>
+      </g>
+      <line x1="702" y1="132" x2="739" y2="132" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#arr)"/>
+
+      <!-- stage 5: multi-byte head -->
+      <g>
+        <rect x="742" y="100" width="180" height="64" rx="8" fill="rgba(244,114,182,.10)" stroke="#f472b6" stroke-width="1.2"/>
+        <text class="node-t" x="832" y="122" text-anchor="middle" font-size="13" font-weight="600">Multi-byte head</text>
+        <text class="node-s" x="832" y="140" text-anchor="middle">D &#8594; n_predict &#215; 256</text>
+      </g>
+      <path d="M790,166 L790,233" stroke="#f87171" stroke-width="1.6" fill="none" marker-end="url(#arr)"/>
+
+      <!-- loss terminal -->
+      <g>
+        <rect x="742" y="236" width="160" height="44" rx="8" fill="rgba(248,113,113,.10)" stroke="#f87171" stroke-width="1.4"/>
+        <text class="tt" x="822" y="254" text-anchor="middle" font-size="12" fill="#fca5a5">Loss</text>
+        <text class="mono" x="822" y="271" text-anchor="middle" font-size="11" fill="#fecaca">L = &#931;&#8342; CE(pred&#8342;, b&#8346;+&#8342;)</text>
+      </g>
+
+      <!-- tensor annotations -->
+      <text class="mono lbl" x="89"  y="190" text-anchor="middle">(B, T) · int8 · 256 values</text>
+      <text class="mono lbl" x="281" y="190" text-anchor="middle">(B, T, D) · float</text>
+      <text class="mono lbl" x="488" y="190" text-anchor="middle">state h&#8346; (B, T, D) per layer</text>
+      <text class="mono lbl" x="660" y="190" text-anchor="middle">(B, T, D)</text>
+      <text class="mono lbl" x="832" y="190" text-anchor="middle">logits (B, T, n_predict·256)</text>
+
+      <text class="lbl" x="490" y="310" text-anchor="middle" font-size="11">single objective &#183; next-byte cross-entropy summed over the n_predict horizons</text>
+    </svg>
+    </div>
+    <figcaption><b>Figure 1</b> — The whole model is four stages. There is no vocabulary table, no positional embedding, and no attention: order comes from the sequential scan, and the only "vocabulary" is the 256-entry byte embedding. <span class="src">source: <a href="VECTOR/model.py">VECTOR/model.py</a> — <a href="VECTOR/model.py#L189">byte_embed</a>, <a href="VECTOR/model.py#L191">blocks</a>, <a href="VECTOR/model.py#L195">ln_f/head</a></span></figcaption>
+  </figure>
+
+  <!-- ============ FIGURE 2 : SSM BLOCK ============ -->
+  <figure id="fig2">
+    <div class="svgwrap">
+    <svg viewBox="0 0 980 700" role="img" aria-label="SSM block internals">
+      <style>
+        .tt{ font-family: var(--sans); font-weight:600; fill:#fff; font-size:13px; }
+        .ss{ font-family: var(--sans); fill:#9aa5bd; font-size:11px; }
+        .mono{ font-family: var(--mono); }
+        .mn{ font-family: var(--mono); fill:#f0f2f8; font-size:11.5px; }
+        .ann{ font-family: var(--mono); fill:#5a6375; font-size:10.5px; }
+      </style>
+
+      <text class="tt" x="490" y="26" text-anchor="middle" font-size="15" fill="#e6e8ee">SSM block — a Mamba-style selective state-space layer, repeated N_layers times</text>
+
+      <!-- x_t -->
+      <rect x="260" y="46" width="160" height="44" rx="8" fill="rgba(52,211,153,.10)" stroke="#34d399" stroke-width="1.2"/>
+      <text class="tt" x="340" y="64" text-anchor="middle" fill="#6ee7b7">x&#8346; (D)</text>
+      <text class="ss" x="340" y="80" text-anchor="middle">from previous block</text>
+      <line x1="340" y1="90" x2="340" y2="106" stroke="#8b93a7" stroke-width="1.5" marker-end="url(#arr)"/>
+
+      <!-- in_proj -->
+      <rect x="260" y="108" width="160" height="44" rx="8" fill="rgba(96,165,250,.10)" stroke="#60a5fa" stroke-width="1.2"/>
+      <text class="tt" x="340" y="126" text-anchor="middle">in_proj</text>
+      <text class="ss" x="340" y="142" text-anchor="middle">D &#8594; 2H · split into main + gate</text>
+
+      <!-- split -->
+      <line x1="340" y1="152" x2="340" y2="168" stroke="#8b93a7" stroke-width="1.5" marker-end="url(#arr)"/>
+      <line x1="340" y1="162" x2="505" y2="162" stroke="#8b93a7" stroke-width="1.5" marker-end="url(#arr)"/>
+      <text class="ann" x="422" y="154" text-anchor="middle">gate branch</text>
+
+      <!-- x_main chain -->
+      <rect x="260" y="176" width="160" height="36" rx="8" fill="rgba(167,139,250,.10)" stroke="#a78bfa" stroke-width="1.2"/>
+      <text class="tt" x="340" y="199" text-anchor="middle">SiLU</text>
+      <line x1="340" y1="212" x2="340" y2="228" stroke="#8b93a7" stroke-width="1.5" marker-end="url(#arr)"/>
+
+      <rect x="260" y="230" width="160" height="40" rx="8" fill="rgba(167,139,250,.10)" stroke="#a78bfa" stroke-width="1.2"/>
+      <text class="tt" x="340" y="248" text-anchor="middle">Conv1d</text>
+      <text class="ss" x="340" y="262" text-anchor="middle">k=4 · depthwise · causal</text>
+      <line x1="340" y1="270" x2="340" y2="286" stroke="#8b93a7" stroke-width="1.5" marker-end="url(#arr)"/>
+
+      <rect x="260" y="288" width="160" height="36" rx="8" fill="rgba(167,139,250,.10)" stroke="#a78bfa" stroke-width="1.2"/>
+      <text class="tt" x="340" y="311" text-anchor="middle">SiLU</text>
+      <line x1="340" y1="324" x2="340" y2="340" stroke="#8b93a7" stroke-width="1.5" marker-end="url(#arr)"/>
+
+      <rect x="260" y="342" width="160" height="44" rx="8" fill="rgba(245,158,11,.10)" stroke="#f59e0b" stroke-width="1.2"/>
+      <text class="tt" x="340" y="360" text-anchor="middle">dt_proj · x_proj</text>
+      <text class="ss" x="340" y="376" text-anchor="middle">softplus &#8594; &#916;&#8346; · [B&#8346; | C&#8346;]</text>
+      <text class="ann" x="430" y="364">&#916;&#8346; = softplus(W&#916;·x&#8346;)</text>
+      <line x1="340" y1="386" x2="340" y2="402" stroke="#8b93a7" stroke-width="1.5" marker-end="url(#arr)"/>
+
+      <!-- SSM scan -->
+      <rect x="160" y="404" width="360" height="92" rx="10" fill="rgba(245,158,11,.12)" stroke="#f59e0b" stroke-width="1.6"/>
+      <text class="tt" x="340" y="426" text-anchor="middle" fill="#fbbf24">SSM scan · O(T) · SSMScanFn</text>
+      <text class="mn" x="340" y="450" text-anchor="middle">h&#8346; = h&#8346;-&#8321; · exp(&#916;&#8346;·A) + &#916;&#8346;·B&#8346;·x&#8346;</text>
+      <text class="mn" x="340" y="470" text-anchor="middle">y&#8346; = C&#8346; · h&#8346; + D · x&#8346;</text>
+      <text class="ann" x="532" y="436">A = &#8722;exp(A_log) &#8594; always stable</text>
+      <line x1="340" y1="496" x2="340" y2="512" stroke="#8b93a7" stroke-width="1.5" marker-end="url(#arr)"/>
+
+      <!-- multiply gate -->
+      <rect x="280" y="514" width="120" height="40" rx="8" fill="rgba(244,114,182,.10)" stroke="#f472b6" stroke-width="1.2"/>
+      <text class="tt" x="340" y="531" text-anchor="middle" font-size="12">y = y &#183; gate</text>
+      <text class="ss" x="340" y="546" text-anchor="middle">gating (sigmoid)</text>
+
+      <!-- gate branch -->
+      <rect x="510" y="144" width="100" height="36" rx="8" fill="rgba(244,114,182,.10)" stroke="#f472b6" stroke-width="1.2"/>
+      <text class="tt" x="560" y="161" text-anchor="middle" font-size="12">gate</text>
+      <text class="ss" x="560" y="175" text-anchor="middle">sigmoid</text>
+      <path d="M560,180 L560,534 L402,534" fill="none" stroke="#f472b6" stroke-width="1.4" marker-end="url(#arr)"/>
+
+      <line x1="340" y1="554" x2="340" y2="570" stroke="#8b93a7" stroke-width="1.5" marker-end="url(#arr)"/>
+
+      <!-- out_proj -->
+      <rect x="260" y="572" width="160" height="44" rx="8" fill="rgba(96,165,250,.10)" stroke="#60a5fa" stroke-width="1.2"/>
+      <text class="tt" x="340" y="590" text-anchor="middle">out_proj</text>
+      <text class="ss" x="340" y="606" text-anchor="middle">H &#8594; D</text>
+      <line x1="340" y1="616" x2="340" y2="632" stroke="#8b93a7" stroke-width="1.5" marker-end="url(#arr)"/>
+
+      <!-- residual + LN -->
+      <rect x="260" y="634" width="160" height="40" rx="8" fill="rgba(148,163,184,.14)" stroke="#94a3b8" stroke-width="1.3"/>
+      <text class="tt" x="340" y="652" text-anchor="middle">LN(x + out)</text>
+      <text class="ss" x="340" y="667" text-anchor="middle">residual connection</text>
+
+      <!-- residual branch -->
+      <path d="M262,68 L140,68 L140,654 L258,654" fill="none" stroke="#5a6375" stroke-width="1.3" stroke-dasharray="4,3" marker-end="url(#arr)"/>
+      <text class="ann" x="150" y="420">residual</text>
+
+      <text class="ann" x="340" y="694" text-anchor="middle">output x&#8346;&#8321; &#8594; next SSM block (or ln_f after the final one)</text>
+    </svg>
+    </div>
+    <figcaption><b>Figure 2</b> — One selective SSM block. The input is split into a main path (SiLU &#8594; depthwise conv &#8594; SiLU &#8594; projections) and a gating path; the projections produce an input-dependent step size &#916;&#8346; and state projections B&#8346;, C&#8346;; the scan integrates the recurrence in O(T); the output is gated, projected back to D, and added residually. <span class="src">source: <a href="VECTOR/model.py#L123">VECTOR/model.py:123 — SSMBlock</a></span></figcaption>
+  </figure>
+
+  <!-- ============ FIGURE 3 : SCAN PRIMITIVE ============ -->
+  <figure id="fig3">
+    <div class="svgwrap">
+    <svg viewBox="0 0 980 360" role="img" aria-label="The scan primitive">
+      <style>
+        .tt{ font-family: var(--sans); font-weight:600; fill:#e6e8ee; font-size:13px; }
+        .st{ font-family: var(--sans); fill:#8b93a7; font-size:11px; }
+        .mn{ font-family: var(--mono); fill:#f0f2f8; font-size:11px; }
+        .mnb{ font-family: var(--mono); fill:#fbbf24; font-size:11px; }
+        .pannel{ fill:#151b26; stroke:#222a3a; }
+      </style>
+
+      <text class="tt" x="490" y="24" text-anchor="middle" font-size="15">The scan primitive — three ways to run h&#8346; = h&#8346;-&#8321;·a&#8346; + b&#8346;</text>
+
+      <!-- panel a: sequential forward -->
+      <rect x="16" y="42" width="300" height="300" rx="10" fill="rgba(52,211,153,.04)" stroke="rgba(52,211,153,.35)"/>
+      <text class="tt" x="166" y="68" text-anchor="middle" fill="#6ee7b7">(a) Forward · sequential O(T)</text>
+      <text class="mn" x="166" y="88" text-anchor="middle">a&#8346; = exp(&#916;&#8346;A)   b&#8346; = &#916;&#8346;B&#8346;x&#8346;</text>
+
+      <rect x="34" y="120" width="58" height="40" rx="6" fill="rgba(52,211,153,.12)" stroke="#34d399"/>
+      <text class="mn" x="63" y="144" text-anchor="middle">h&#8320;=0</text>
+      <line x1="92" y1="140" x2="124" y2="140" stroke="#8b93a7" stroke-width="1.4" marker-end="url(#arr)"/>
+      <text class="mnb" x="108" y="132" text-anchor="middle">·a&#8321;+b&#8321;</text>
+      <rect x="126" y="120" width="58" height="40" rx="6" fill="rgba(52,211,153,.12)" stroke="#34d399"/>
+      <text class="mn" x="155" y="144" text-anchor="middle">h&#8321;</text>
+      <line x1="184" y1="140" x2="216" y2="140" stroke="#8b93a7" stroke-width="1.4" marker-end="url(#arr)"/>
+      <text class="mnb" x="200" y="132" text-anchor="middle">·a&#8322;+b&#8322;</text>
+      <rect x="218" y="120" width="58" height="40" rx="6" fill="rgba(52,211,153,.12)" stroke="#34d399"/>
+      <text class="mn" x="247" y="144" text-anchor="middle">h&#8322;</text>
+      <line x1="276" y1="140" x2="292" y2="140" stroke="#8b93a7" stroke-width="1.4" marker-end="url(#arr)"/>
+      <text class="mn" x="296" y="144" fill="#8b93a7">…</text>
+
+      <text class="st" x="166" y="230" text-anchor="middle">JIT-fused loop (model.py) — one</text>
+      <text class="st" x="166" y="248" text-anchor="middle">CUDA kernel, no per-step Python</text>
+      <text class="st" x="166" y="266" text-anchor="middle">overhead. O(T) time, O(T) state.</text>
+      <text class="mn" x="166" y="296" text-anchor="middle" fill="#34d399">_ssm_fwd  @torch.jit.script</text>
+      <text class="st" x="166" y="318" text-anchor="middle">sequential — optimal on CPU</text>
+
+      <!-- panel b: custom backward -->
+      <rect x="336" y="42" width="300" height="300" rx="10" fill="rgba(96,165,250,.04)" stroke="rgba(96,165,250,.35)"/>
+      <text class="tt" x="486" y="68" text-anchor="middle" fill="#93c5fd">(b) Backward · reverse scan O(T)</text>
+      <text class="mn" x="486" y="88" text-anchor="middle">SSMScanFn · custom autograd Function</text>
+
+      <rect x="354" y="120" width="58" height="40" rx="6" fill="rgba(96,165,250,.12)" stroke="#60a5fa"/>
+      <text class="mn" x="383" y="144" text-anchor="middle">dh&#8340;</text>
+      <line x1="354" y1="140" x2="322" y2="140" stroke="#8b93a7" stroke-width="1.4" marker-end="url(#arr)"/>
+      <text class="mnb" x="338" y="132" text-anchor="middle">·a&#8340;</text>
+      <rect x="264" y="120" width="58" height="40" rx="6" fill="rgba(96,165,250,.12)" stroke="#60a5fa"/>
+      <text class="mn" x="293" y="144" text-anchor="middle">dh&#8340;-&#8321;</text>
+      <line x1="264" y1="140" x2="232" y2="140" stroke="#8b93a7" stroke-width="1.4" marker-end="url(#arr)"/>
+      <text class="mnb" x="248" y="132" text-anchor="middle">·a&#8340;-&#8321;</text>
+      <rect x="174" y="120" width="58" height="40" rx="6" fill="rgba(96,165,250,.12)" stroke="#60a5fa"/>
+      <text class="mn" x="203" y="144" text-anchor="middle">dh&#8321;</text>
+      <line x1="174" y1="140" x2="148" y2="140" stroke="#8b93a7" stroke-width="1.4" marker-end="url(#arr)"/>
+
+      <text class="mn" x="486" y="222" text-anchor="middle">grad_b&#8346; = dh&#8346;             (b-input grad)</text>
+      <text class="mn" x="486" y="244" text-anchor="middle">grad_a&#8346; = dh&#8346; · h&#8346;-&#8321;    (decay grad)</text>
+
+      <text class="st" x="486" y="286" text-anchor="middle">manual reverse pass replaces the</text>
+      <text class="st" x="486" y="304" text-anchor="middle">O(T) autograd graph — no graph</text>
+      <text class="st" x="486" y="322" text-anchor="middle">memory, bit-exact grads.</text>
+
+      <!-- panel c: parallel associative -->
+      <rect x="656" y="42" width="308" height="300" rx="10" fill="rgba(245,158,11,.04)" stroke="rgba(245,158,11,.35)"/>
+      <text class="tt" x="810" y="68" text-anchor="middle" fill="#fbbf24">(c) Parallel scan · O(log T) · Triton</text>
+      <text class="mn" x="810" y="88" text-anchor="middle">(a&#8322;,b&#8322;)&#8728;(a&#8321;,b&#8321;) = (a&#8322;a&#8321;, a&#8322;b&#8321;+b&#8322;)</text>
+
+      <!-- binary tree -->
+      <g stroke="#8b93a7" stroke-width="1.3">
+        <line x1="684" y1="130" x2="714" y2="180"/>
+        <line x1="724" y1="130" x2="714" y2="180"/>
+        <line x1="764" y1="130" x2="774" y2="180"/>
+        <line x1="804" y1="130" x2="774" y2="180"/>
+        <line x1="844" y1="130" x2="834" y2="180"/>
+        <line x1="884" y1="130" x2="834" y2="180"/>
+        <line x1="924" y1="130" x2="894" y2="180"/>
+        <line x1="940" y1="130" x2="894" y2="180"/>
+        <line x1="714" y1="180" x2="744" y2="230"/>
+        <line x1="774" y1="180" x2="744" y2="230"/>
+        <line x1="834" y1="180" x2="804" y2="230"/>
+        <line x1="894" y1="180" x2="804" y2="230"/>
+        <line x1="744" y1="230" x2="774" y2="280"/>
+        <line x1="804" y1="230" x2="774" y2="280"/>
+      </g>
+      <g fill="rgba(245,158,11,.25)" stroke="#f59e0b" stroke-width="1.2">
+        <circle cx="684" cy="130" r="7"/><circle cx="724" cy="130" r="7"/><circle cx="764" cy="130" r="7"/><circle cx="804" cy="130" r="7"/>
+        <circle cx="844" cy="130" r="7"/><circle cx="884" cy="130" r="7"/><circle cx="924" cy="130" r="7"/><circle cx="940" cy="130" r="7"/>
+      </g>
+      <g fill="rgba(245,158,11,.45)" stroke="#f59e0b" stroke-width="1.4">
+        <circle cx="714" cy="180" r="8"/><circle cx="774" cy="180" r="8"/><circle cx="834" cy="180" r="8"/><circle cx="894" cy="180" r="8"/>
+      </g>
+      <g fill="rgba(245,158,11,.65)" stroke="#f59e0b" stroke-width="1.6">
+        <circle cx="744" cy="230" r="9"/><circle cx="804" cy="230" r="9"/>
+      </g>
+      <g fill="#f59e0b" stroke="#fbbf24" stroke-width="1.8">
+        <circle cx="774" cy="280" r="11"/>
+      </g>
+
+      <text class="st" x="810" y="316" text-anchor="middle">fused kernel · grid (B,H,N) · log-depth</text>
+      <text class="st" x="810" y="334" text-anchor="middle">tree in SRAM — no HBM round-trips</text>
+    </svg>
+    </div>
+    <figcaption><b>Figure 3</b> — The core primitive. (a) The JIT-fused sequential recurrence for CPU. (b) <b>SSMScanFn</b>, the custom <span class="mono">torch.autograd.Function</span> whose manual reverse scan avoids building the O(T) autograd graph — roughly 10&#215; faster backward, bit-exact. (c) The Triton parallel associative scan: since the combination operator is associative, prefix states can be merged in a binary tree, giving O(log T) parallel depth on GPU. <span class="src">source: <a href="VECTOR/model.py#L31">model.py#L31 (_ssm_fwd/_ssm_bwd)</a>, <a href="VECTOR/model.py#L54">model.py#L54 (SSMScanFn)</a>, <a href="VECTOR/triton_scan.py">VECTOR/triton_scan.py</a></span></figcaption>
+  </figure>
+
+  <!-- ============ FIGURE 4 : MULTI-BYTE HEAD ============ -->
+  <figure id="fig4">
+    <div class="svgwrap">
+    <svg viewBox="0 0 980 300" role="img" aria-label="Multi-byte prediction head">
+      <style>
+        .tt{ font-family: var(--sans); font-weight:600; fill:#fff; font-size:13px; }
+        .ss{ font-family: var(--sans); fill:#9aa5bd; font-size:11px; }
+        .mn{ font-family: var(--mono); fill:#f0f2f8; font-size:11px; }
+        .lbl{ font-family: var(--mono); fill:#5a6375; font-size:10.5px; }
+      </style>
+
+      <text class="tt" x="490" y="24" text-anchor="middle" font-size="15" fill="#e6e8ee">Multi-byte prediction head — n_predict = 4 future bytes per position</text>
+
+      <rect x="50" y="120" width="110" height="44" rx="8" fill="rgba(52,211,153,.10)" stroke="#34d399"/>
+      <text class="tt" x="105" y="138" text-anchor="middle">x&#8346;</text>
+      <text class="ss" x="105" y="154" text-anchor="middle">(D) at position t</text>
+      <line x1="162" y1="142" x2="224" y2="142" stroke="#8b93a7" stroke-width="1.5" marker-end="url(#arr)"/>
+
+      <rect x="228" y="100" width="180" height="84" rx="8" fill="rgba(244,114,182,.10)" stroke="#f472b6" stroke-width="1.4"/>
+      <text class="tt" x="318" y="128" text-anchor="middle" fill="#f9a8d4">head</text>
+      <text class="mn" x="318" y="148" text-anchor="middle">D &#8594; 4 &#215; 256</text>
+      <text class="ss" x="318" y="166" text-anchor="middle">one forward pass</text>
+
+      <!-- fan arrows -->
+      <line x1="410" y1="112" x2="466" y2="78"  stroke="#f472b6" stroke-width="1.4" marker-end="url(#arr)"/>
+      <line x1="410" y1="142" x2="466" y2="134" stroke="#f472b6" stroke-width="1.4" marker-end="url(#arr)"/>
+      <line x1="410" y1="160" x2="466" y2="190" stroke="#f472b6" stroke-width="1.4" marker-end="url(#arr)"/>
+      <line x1="410" y1="170" x2="466" y2="246" stroke="#f472b6" stroke-width="1.4" marker-end="url(#arr)"/>
+
+      <!-- logit columns -->
+      <rect x="470" y="60" width="140" height="36" rx="6" fill="rgba(244,114,182,.12)" stroke="#f472b6"/>
+      <text class="mn" x="540" y="83" text-anchor="middle">logits k=0 · (256)</text>
+      <rect x="470" y="116" width="140" height="36" rx="6" fill="rgba(244,114,182,.12)" stroke="#f472b6"/>
+      <text class="mn" x="540" y="139" text-anchor="middle">logits k=1 · (256)</text>
+      <rect x="470" y="172" width="140" height="36" rx="6" fill="rgba(244,114,182,.12)" stroke="#f472b6"/>
+      <text class="mn" x="540" y="195" text-anchor="middle">logits k=2 · (256)</text>
+      <rect x="470" y="228" width="140" height="36" rx="6" fill="rgba(244,114,182,.12)" stroke="#f472b6"/>
+      <text class="mn" x="540" y="251" text-anchor="middle">logits k=3 · (256)</text>
+
+      <!-- sample arrows -->
+      <line x1="612" y1="78"  x2="654" y2="78"  stroke="#8b93a7" stroke-width="1.4" marker-end="url(#arr)"/>
+      <line x1="612" y1="134" x2="654" y2="134" stroke="#8b93a7" stroke-width="1.4" marker-end="url(#arr)"/>
+      <line x1="612" y1="190" x2="654" y2="190" stroke="#8b93a7" stroke-width="1.4" marker-end="url(#arr)"/>
+      <line x1="612" y1="246" x2="654" y2="246" stroke="#8b93a7" stroke-width="1.4" marker-end="url(#arr)"/>
+
+      <!-- sampled bytes -->
+      <rect x="656" y="60" width="92" height="36" rx="6" fill="rgba(52,211,153,.12)" stroke="#34d399"/>
+      <text class="mn" x="702" y="83" text-anchor="middle" fill="#6ee7b7">b&#8346;+&#8321;</text>
+      <rect x="656" y="116" width="92" height="36" rx="6" fill="rgba(52,211,153,.12)" stroke="#34d399"/>
+      <text class="mn" x="702" y="139" text-anchor="middle" fill="#6ee7b7">b&#8346;+&#8322;</text>
+      <rect x="656" y="172" width="92" height="36" rx="6" fill="rgba(52,211,153,.12)" stroke="#34d399"/>
+      <text class="mn" x="702" y="195" text-anchor="middle" fill="#6ee7b7">b&#8346;+&#8322;&#8321;</text>
+      <rect x="656" y="228" width="92" height="36" rx="6" fill="rgba(52,211,153,.12)" stroke="#34d399"/>
+      <text class="mn" x="702" y="251" text-anchor="middle" fill="#6ee7b7">b&#8346;+&#8324;</text>
+
+      <!-- loss box -->
+      <rect x="774" y="118" width="190" height="80" rx="8" fill="rgba(248,113,113,.10)" stroke="#f87171" stroke-width="1.3"/>
+      <text class="tt" x="869" y="142" text-anchor="middle" fill="#fca5a5" font-size="12">L = &#931;&#8342; CE(pred&#8342;, b&#8346;+&#8342;)</text>
+      <text class="ss" x="869" y="162" text-anchor="middle">k = 0 … n_predict−1</text>
+      <text class="ss" x="869" y="180" text-anchor="middle">single objective</text>
+
+      <text class="lbl" x="470" y="48" font-size="10.5">4&#215; training signal per position</text>
+      <text class="lbl" x="470" y="286" font-size="10.5">4&#215; faster autoregressive decoding (4 bytes per model step)</text>
+      <text class="lbl" x="20" y="230" font-size="10.5">also forces semantic learning:</text>
+      <text class="lbl" x="20" y="246" font-size="10.5">cannot copy byte t&#8594;t+1 only</text>
+    </svg>
+    </div>
+    <figcaption><b>Figure 4</b> — From each position the head emits n_predict independent 256-way byte distributions and samples the next n_predict bytes in one forward pass. This multiplies the per-step training signal by 4 and shortens autoregressive decoding by 4&#215;. <span class="src">source: <a href="VECTOR/model.py#L245">model.py#L245 (_compute_loss)</a>, <a href="VECTOR/model.py#L276">model.py#L276 (generate)</a></span></figcaption>
+  </figure>
+
+  <!-- ============ FIGURE 5 : FAMILY ============ -->
+  <figure id="fig5">
+    <div class="svgwrap">
+    <svg viewBox="0 0 980 340" role="img" aria-label="Stream family tree">
+      <style>
+        .tt{ font-family: var(--sans); font-weight:600; fill:#fff; font-size:13px; }
+        .ss{ font-family: var(--sans); fill:#9aa5bd; font-size:11px; }
+        .mn{ font-family: var(--mono); fill:#cbd2e0; font-size:11px; }
+        .stt{ font-family: var(--mono); fill:#5a6375; font-size:10.5px; }
+      </style>
+
+      <text class="tt" x="490" y="26" text-anchor="middle" font-size="15" fill="#e6e8ee">The Stream family — what gets added on top of the pure SSM backbone</text>
+
+      <!-- root -->
+      <rect x="330" y="52" width="320" height="56" rx="10" fill="rgba(167,139,250,.14)" stroke="#a78bfa" stroke-width="1.6"/>
+      <text class="tt" x="490" y="76" text-anchor="middle" fill="#c4b5fd" font-size="14">Stream</text>
+      <text class="mn" x="490" y="96" text-anchor="middle">pure byte-level SSM · single loss · O(n)</text>
+
+      <line x1="460" y1="108" x2="300" y2="160" stroke="#8b93a7" stroke-width="1.4" marker-end="url(#arr)"/>
+      <line x1="520" y1="108" x2="680" y2="160" stroke="#8b93a7" stroke-width="1.4" marker-end="url(#arr)"/>
+
+      <!-- VECTOR -->
+      <rect x="56" y="162" width="420" height="156" rx="10" fill="rgba(96,165,250,.05)" stroke="#60a5fa" stroke-width="1.4"/>
+      <text class="tt" x="266" y="188" text-anchor="middle" fill="#93c5fd" font-size="14">VECTOR</text>
+      <text class="ss" x="266" y="206" text-anchor="middle">SSM + learned pruning + attention + MoE</text>
+      <text class="mn" x="266" y="230" text-anchor="middle">&#8226; saliency gate — STE position pruning</text>
+      <text class="mn" x="266" y="250" text-anchor="middle">&#8226; AtomAttention — GQA, masked to kept atoms</text>
+      <text class="mn" x="266" y="270" text-anchor="middle">&#8226; MoE top-2 + five-term dual loss</text>
+      <text class="stt" x="266" y="298" text-anchor="middle">status: gate collapse (active_ratio=1.0) — needs retune</text>
+
+      <!-- MoE-Stream -->
+      <rect x="504" y="162" width="420" height="156" rx="10" fill="rgba(52,211,153,.05)" stroke="#34d399" stroke-width="1.4"/>
+      <text class="tt" x="714" y="188" text-anchor="middle" fill="#6ee7b7" font-size="14">MoE-Stream</text>
+      <text class="ss" x="714" y="206" text-anchor="middle">SSM + sparse mixture-of-experts</text>
+      <text class="mn" x="714" y="230" text-anchor="middle">&#8226; MoE FFN after each SSM block</text>
+      <text class="mn" x="714" y="250" text-anchor="middle">&#8226; expert lifecycle — value = impact / freq</text>
+      <text class="mn" x="714" y="270" text-anchor="middle">&#8226; replacement via best-expert clone + noise</text>
+      <text class="stt" x="714" y="298" text-anchor="middle">status: replacement hurts (2.35 vs 2.19) — keep OFF</text>
+    </svg>
+    </div>
+    <figcaption><b>Figure 5</b> — Variants built on the Stream backbone. VECTOR adds learned position pruning, GQA attention, and MoE under a five-term loss (gate collapsed in practice). MoE-Stream adds MoE FFNs with gradient-aware expert lifecycle management; its controlled ablation showed replacement <em>hurts</em> validation loss, so it is disabled by default. <span class="src">source: <a href="VECTOR/model_vector.py">VECTOR/model_vector.py</a>, <a href="VECTOR/moe_stream.py">VECTOR/moe_stream.py</a></span></figcaption>
+  </figure>
+
+  <div class="note">
+    <b>Honest context.</b> Stream's value proposition is <b>O(n)</b> — flat ~228K tok/s across all sequence lengths (forward-only benchmark), O(n) memory (6.77 GB at T=65,536 on a T4), and a projected crossover vs. quadratic attention at T&#8776;9k (1.73&#215; at T=16k, forward-only). The naive JIT scan measures Python-loop overhead, not asymptotics; the current GPU implementation is the fused Triton scan, plus a <b>chunked two-level scan</b> for low-B&middot;H, occupancy-starved shapes and a shape-conditional <b>auto-dispatch</b> rule (chunked iff B&middot;H&le;128, else fused; no T threshold) — all benchmarked on T4 (see §5.9 of the report). The kernel body is still a serial loop over T (grid B&middot;H), not a true O(log T) parallel tree scan. End-to-end training throughput is being re-measured after fixing a missing <code>torch.cuda.synchronize()</code>; earlier "12 ms/iter / 73&#215;" figures were CPU-scheduling artifacts. The transformer still wins on loss at matched small-scale parameter counts — this diagram is the architecture, not the final verdict.
+  </div>
+
+  <footer>Stream / VECTOR / MoE-Stream &middot; architecture diagram &middot; July 2026</footer>
+
+</div>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="context-stroke"/>
+    </marker>
+  </defs>
+</svg>
+
+</body>
+</html>
