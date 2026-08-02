@@ -177,7 +177,23 @@ bench_chunked(T=32768, H=64, N=8, B=3, iters=10)
 # that were logged without torch.cuda.synchronize). Fresh model per row,
 # fwd+bwd per iter, sync after each batch. All rows below have B*H >= 512, so
 # auto and fused pick the same fused path here (chunked only engages at B*H<=128).
-# Run inside the stream_colab.ipynb training environment (has md, ts, device).
+# Self-contained: loads triton_scan (ts) and model (md) if CELL 1 hasn't already.
+import torch, time, importlib, os, sys
+if 'ts' not in globals():
+    _vd = None
+    for _p in [os.getcwd(), '/content/RETRANS-X', '/content']:
+        if os.path.isdir(os.path.join(_p, 'VECTOR')): _vd = os.path.join(_p, 'VECTOR'); break
+    sys.path.insert(0, _vd)
+    import triton_scan as ts
+if 'md' not in globals():
+    _vd = None
+    for _p in [os.getcwd(), '/content/RETRANS-X', '/content']:
+        if os.path.isdir(os.path.join(_p, 'VECTOR')): _vd = os.path.join(_p, 'VECTOR'); break
+    md = importlib.util.module_from_spec(
+        (s := importlib.util.spec_from_file_location('md', os.path.join(_vd, 'model.py')))
+    ); s.loader.exec_module(md)
+device = 'cuda'
+
 def bench_e2e(B, T, mode, iters=5):
     m = md.Stream(md.StreamConfig(
         n_embd=128, n_layer=4, ssm_d_state=8, n_predict=4,
@@ -227,6 +243,15 @@ print('\nPaste the ms/iter + tok/s rows into index.html §5.4 and drop the stale
 # Patched version below renames it to Bs. enable_triton reads the wrapper as a
 # module global at call time, so reassigning ts.auto_triton_wrapped_scan is
 # enough — no need to re-pull the repo. Run BEFORE any auto=True call.
+# Self-contained: loads triton_scan as ts if CELL 1 hasn't already.
+import torch, os, sys
+if 'ts' not in globals():
+    _vd = None
+    for _p in [os.getcwd(), '/content/RETRANS-X', '/content']:
+        if os.path.isdir(os.path.join(_p, 'VECTOR')): _vd = os.path.join(_p, 'VECTOR'); break
+    sys.path.insert(0, _vd)
+    import triton_scan as ts
+
 def _auto_scan_fixed(self, u, dt, A, B, C):
     D = self.D.to(u.dtype)
     Bs, T, H = u.shape
