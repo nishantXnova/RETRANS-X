@@ -884,21 +884,31 @@ class ChunkedSSMScanFn(torch.autograd.Function):
 
 def chunked_triton_wrapped_scan(self, u, dt, A, B, C):
     D = self.D.to(u.dtype)
-    h = ChunkedSSMScanFn.apply(u, dt, A, B, u.shape[1], CHUNK_DEFAULT)
+    T = u.shape[1]
+    if T >= CHUNK_DEFAULT and T % CHUNK_DEFAULT == 0:
+        h = ChunkedSSMScanFn.apply(u, dt, A, B, T, CHUNK_DEFAULT)
+    else:
+        # short/non-divisible T (e.g. generation): fused handles any T
+        h = FusedSSMScanFn.apply(u, dt, A, B, T)
     y = (h * C.unsqueeze(2)).sum(-1) + D * u
     return y, (h[:, -1].detach(), None)
 
 
 def enable_triton(model, enabled: bool = True, fused: bool = False,
-                  chunked: bool = False):
+                  chunked: bool = False, chunked_threshold: int = 32768):
     """
     Monkey-patch model's SSMBlock to use a Triton scan. Auto-verifies the
     requested kernel against a pure-PyTorch reference and falls back safely:
     chunked -> fused -> non-fused Triton. Call this after model creation.
 
+    chunked=True engages the two-level scan only when the model's block_size
+    >= chunked_threshold (benchmarked: chunked beats fused at long T/low B,
+    e.g. B=1,T=32768; fused wins at B=4,T<=16384). Below the threshold it
+    uses the fused scan instead.
+
     Usage:
         model = Stream(config)
-        enable_triton(model, chunked=True)
+        enable_triton(model, chunked=True, chunked_threshold=32768)
     """
     if enabled and not HAS_TRITON:
         print("WARNING: Triton not available, keeping JIT scan")
@@ -912,16 +922,24 @@ def enable_triton(model, enabled: bool = True, fused: bool = False,
         y = (h * C.unsqueeze(2)).sum(-1) + D * u
         return y, (h[:, -1].detach(), None)
 
-    if enabled and chunked:
+    block_size = getattr(getattr(model, 'config', None), 'block_size', 0)
+    use_chunked = bool(chunked) and block_size >= chunked_threshold
+
+    if enabled and chunked and not use_chunked:
+        print(f"block_size={block_size} < chunked_threshold={chunked_threshold}; "
+              f"using fused scan instead")
+        fused = True
+
+    if enabled and use_chunked:
         ok = check_chunked()
         if ok:
             print("Chunked Triton scan enabled (two-level, exp/mul fused)")
         else:
             print("WARNING: chunked scan verification FAILED - falling back to fused")
-            chunked = False
+            use_chunked = False
             fused = True
 
-    if enabled and fused and not chunked:
+    if enabled and fused and not use_chunked:
         ok = check_fused()
         if ok:
             print("Fused Triton scan enabled (exp/mul computed in-kernel)")
@@ -929,7 +947,7 @@ def enable_triton(model, enabled: bool = True, fused: bool = False,
             print("WARNING: fused scan verification FAILED - falling back to non-fused Triton")
             fused = False
 
-    if enabled and chunked:
+    if enabled and use_chunked:
         scan_wrapper = chunked_triton_wrapped_scan
     elif enabled and fused:
         scan_wrapper = fused_triton_wrapped_scan
@@ -940,7 +958,7 @@ def enable_triton(model, enabled: bool = True, fused: bool = False,
         block._ssm_scan = scan_wrapper.__get__(block, type(block))
 
     if enabled:
-        if chunked:
+        if use_chunked:
             print("Stream scan: CHUNKED (two-level)")
         elif fused:
             print("Stream scan: FUSED (exp/mul in-kernel)")
