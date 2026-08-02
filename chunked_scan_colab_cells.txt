@@ -135,3 +135,13 @@ for chunk in (64, 128, 256, 512, 1024, 2048):
     torch.cuda.synchronize()
     ms = (time.perf_counter() - t0) / 5 * 1000
     print(f'  C_CHUNK={chunk:>5}: {ms:7.2f} ms')
+
+
+# ===================== CELL 6 =====================
+# Sanity-check the shape-conditional dispatch (auto_scan_path)
+from triton_scan import auto_scan_path, AUTO_MIN_T, AUTO_MAX_BH
+
+print(f'Rule: chunked iff T >= {AUTO_MIN_T} and B*H <= {AUTO_MAX_BH} (and T%128==0)')
+for (B, T, H) in [(4, 4096, 128), (4, 16384, 128), (1, 8192, 128),
+                  (1, 32768, 128), (1, 65536, 128), (2, 65536, 64)]:
+    print(f'  B={B:>2} T={T:>6} H={H:>3} -> {auto_scan_path(B, T, H)}')

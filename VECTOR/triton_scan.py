@@ -894,12 +894,48 @@ def chunked_triton_wrapped_scan(self, u, dt, A, B, C):
     return y, (h[:, -1].detach(), None)
 
 
+# Auto scan-path selection (shape-conditional at runtime).
+#
+# Benchmark data: chunked beats fused exactly where fused is occupancy-starved.
+# Fused grid = (B, H) programs (N fits in one block with BLOCK_N). At B=1,H=128
+# that is 128 programs — far below the T4's warp slots — and chunking jumps to
+# thousands of programs, giving 1.21-1.22x over fused at T=32768/65536. At
+# B=4,H=128 (512 programs) fused is already past the occupancy threshold and
+# chunked only adds materialization overhead (0.85-0.87x). Chunk size within a
+# wide range doesn't matter once past the threshold, so CHUNK_DEFAULT=128 is fine.
+AUTO_MIN_T = 32768   # below this, chain depth is cheap -> use fused
+AUTO_MAX_BH = 256    # fused programs B*H at/below this -> occupancy-starved -> chunk
+
+
+def auto_scan_path(B, T, H):
+    """Pick the scan path for a (B, T, H) input: 'chunked' or 'fused'."""
+    if T >= AUTO_MIN_T and B * H <= AUTO_MAX_BH and T % CHUNK_DEFAULT == 0:
+        return 'chunked'
+    return 'fused'
+
+
+def auto_triton_wrapped_scan(self, u, dt, A, B, C):
+    D = self.D.to(u.dtype)
+    B, T, H = u.shape
+    if auto_scan_path(B, T, H) == 'chunked':
+        h = ChunkedSSMScanFn.apply(u, dt, A, B, T, CHUNK_DEFAULT)
+    else:
+        h = FusedSSMScanFn.apply(u, dt, A, B, T)
+    y = (h * C.unsqueeze(2)).sum(-1) + D * u
+    return y, (h[:, -1].detach(), None)
+
+
 def enable_triton(model, enabled: bool = True, fused: bool = False,
-                  chunked: bool = False, chunked_threshold: int = 32768):
+                  chunked: bool = False, chunked_threshold: int = 32768,
+                  auto: bool = False):
     """
     Monkey-patch model's SSMBlock to use a Triton scan. Auto-verifies the
     requested kernel against a pure-PyTorch reference and falls back safely:
     chunked -> fused -> non-fused Triton. Call this after model creation.
+
+    auto=True: pick fused vs chunked per-input-shape at runtime. Uses fused
+    for short T / larger batch (fused wins), chunked for long-T/low-B where
+    fused is occupancy-starved (benchmarked: B=1,T>=32768 -> 1.2x over fused).
 
     chunked=True engages the two-level scan only when the model's block_size
     >= chunked_threshold (benchmarked: chunked beats fused at long T/low B,
@@ -908,7 +944,9 @@ def enable_triton(model, enabled: bool = True, fused: bool = False,
 
     Usage:
         model = Stream(config)
-        enable_triton(model, chunked=True, chunked_threshold=32768)
+        enable_triton(model, auto=True)                      # shape-conditional
+        enable_triton(model, chunked=True)                   # chunked only at long T
+        enable_triton(model, fused=True)                     # fused everywhere
     """
     if enabled and not HAS_TRITON:
         print("WARNING: Triton not available, keeping JIT scan")
@@ -921,6 +959,23 @@ def enable_triton(model, enabled: bool = True, fused: bool = False,
         h = triton_ssm_scan(a_vec, b_vec, u.shape[1], use_triton=enabled)
         y = (h * C.unsqueeze(2)).sum(-1) + D * u
         return y, (h[:, -1].detach(), None)
+
+    if enabled and auto:
+        ok_f = check_fused()
+        ok_c = check_chunked()
+        if ok_f and ok_c:
+            print("Auto Triton scan enabled (shape-conditional fused/chunked)")
+            scan_wrapper = auto_triton_wrapped_scan
+        elif ok_f:
+            print("WARNING: chunked scan verification FAILED - auto mode falling back to fused")
+            scan_wrapper = fused_triton_wrapped_scan
+        else:
+            print("WARNING: fused scan verification FAILED - auto mode falling back to non-fused Triton")
+            scan_wrapper = triton_wrapped_scan
+        for block in model.blocks:
+            block._ssm_scan = scan_wrapper.__get__(block, type(block))
+        print("Stream scan: AUTO (shape-conditional fused/chunked)")
+        return
 
     block_size = getattr(getattr(model, 'config', None), 'block_size', 0)
     use_chunked = bool(chunked) and block_size >= chunked_threshold
