@@ -937,10 +937,10 @@ def reset_auto_path_log():
 
 def auto_triton_wrapped_scan(self, u, dt, A, B, C):
     D = self.D.to(u.dtype)
-    B, T, H = u.shape
-    path = auto_scan_path(B, T, H)
+    Bs, T, H = u.shape
+    path = auto_scan_path(Bs, T, H)
     if AUTO_TRACE:
-        AUTO_PATH_LOG.append((B, T, H, path))
+        AUTO_PATH_LOG.append((Bs, T, H, path))
     if path == 'chunked':
         h = ChunkedSSMScanFn.apply(u, dt, A, B, T, CHUNK_DEFAULT)
     else:
@@ -989,11 +989,12 @@ def enable_triton(model, enabled: bool = True, fused: bool = False,
     if enabled and auto:
         ok_f = check_fused()
         ok_c = check_chunked()
-        if ok_f and ok_c:
+        ok_a = check_auto()
+        if ok_f and ok_c and ok_a:
             print("Auto Triton scan enabled (shape-conditional fused/chunked)")
             scan_wrapper = auto_triton_wrapped_scan
         elif ok_f:
-            print("WARNING: chunked scan verification FAILED - auto mode falling back to fused")
+            print("WARNING: auto wrapper/chunked verification FAILED - auto mode falling back to fused")
             scan_wrapper = fused_triton_wrapped_scan
         else:
             print("WARNING: fused scan verification FAILED - auto mode falling back to non-fused Triton")
@@ -1206,6 +1207,61 @@ def check_chunked(T=1024, H=32, N=8, B=2, atol=1e-4):
         torch.set_rng_state(_rng_cpu)
         torch.cuda.set_rng_state(_rng_cuda, device)
     print('CHUNKED CHECK:', 'PASS' if ok else 'FAIL')
+    return ok
+
+
+def check_auto(T=1024, H=64, N=8, B_low=2, B_high=4, atol=1e-4):
+    """
+    Verify the auto-dispatch WRAPPER (auto_triton_wrapped_scan) end-to-end in
+    both dispatch regimes — B*H<=AUTO_MAX_BH (chunked) and B*H>AUTO_MAX_BH
+    (fused) — by comparing wrapper output/gradients against the fused kernel
+    (which is verified separately). This exercises the wrapper's argument
+    passing (catches e.g. B being shadowed by u.shape), unlike check_fused /
+    check_chunked which call kernels directly. Run on Colab (needs GPU).
+    """
+    device = 'cuda'
+
+    class _Stub(torch.nn.Module):
+        pass
+
+    stub = _Stub()
+    stub.D = torch.randn(H, device=device)
+
+    ok = True
+    for B in (B_low, B_high):
+        if auto_scan_path(B, T, H) == 'chunked':
+            label, expect = 'chunked', 'chunked'
+        else:
+            label, expect = 'fused', 'fused'
+        torch.manual_seed(0)
+        u = torch.randn(B, T, H, device=device); u.requires_grad_()
+        dt = torch.rand(B, T, H, device=device).clamp_min(1e-3) * 0.1; dt.requires_grad_()
+        A = -torch.rand(H, N, device=device).clamp_min(1e-3); A.requires_grad_()
+        Bp = torch.randn(B, T, N, device=device); Bp.requires_grad_()
+        C = torch.randn(B, T, N, device=device)
+
+        y_w, _ = auto_triton_wrapped_scan(stub, u, dt, A, Bp, C)
+        y_w.pow(2).mean().backward()
+        grads_w = {n: t.grad.clone() for n, t in [('u', u), ('dt', dt), ('A', A), ('B', Bp)]}
+        for t in (u, dt, A, Bp):
+            t.grad = None
+
+        h_f = FusedSSMScanFn.apply(u, dt, A, Bp, T)
+        y_f = (h_f * C.unsqueeze(2)).sum(-1) + stub.D * u
+        y_f.pow(2).mean().backward()
+        grads_f = {n: t.grad for n, t in [('u', u), ('dt', dt), ('A', A), ('B', Bp)]}
+
+        d_fwd = (y_w - y_f).abs().max().item()
+        worst = d_fwd
+        for name in ('u', 'dt', 'A', 'B'):
+            worst = max(worst, (grads_w[name] - grads_f[name]).abs().max().item())
+        ok &= worst < atol
+        print(f'  auto B*H={B*H} -> {label}: fwd-vs-fused {d_fwd:.2e}  '
+              f'worst grad diff {worst:.2e}  {"OK" if worst < atol else "FAIL"}')
+        if label != expect:
+            ok = False
+            print(f'  WARNING: auto dispatched to {label}, expected {expect}')
+    print('AUTO CHECK:', 'PASS' if ok else 'FAIL')
     return ok
 
 
