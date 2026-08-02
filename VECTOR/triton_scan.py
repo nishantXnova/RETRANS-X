@@ -1010,10 +1010,10 @@ def bench_fused(T=4096, H=128, N=8, B=4, iters=20):
     import time
     device = 'cuda'
     torch.manual_seed(0)
-    u = torch.randn(B, T, H, device=device)
-    dt = torch.rand(B, T, H, device=device).clamp_min(1e-3) * 0.1
-    A = -torch.rand(H, N, device=device).clamp_min(1e-3)
-    Bp = torch.randn(B, T, N, device=device)
+    u = torch.randn(B, T, H, device=device); u.requires_grad_()
+    dt = torch.rand(B, T, H, device=device).clamp_min(1e-3) * 0.1; dt.requires_grad_()
+    A = -torch.rand(H, N, device=device).clamp_min(1e-3); A.requires_grad_()
+    Bp = torch.randn(B, T, N, device=device); Bp.requires_grad_()
     C = torch.randn(B, T, N, device=device)
     D = torch.randn(H, device=device)
 
@@ -1115,10 +1115,10 @@ def bench_chunked(T=4096, H=128, N=8, B=4, iters=20):
     import time
     device = 'cuda'
     torch.manual_seed(0)
-    u = torch.randn(B, T, H, device=device)
-    dt = torch.rand(B, T, H, device=device).clamp_min(1e-3) * 0.1
-    A = -torch.rand(H, N, device=device).clamp_min(1e-3)
-    Bp = torch.randn(B, T, N, device=device)
+    u = torch.randn(B, T, H, device=device); u.requires_grad_()
+    dt = torch.rand(B, T, H, device=device).clamp_min(1e-3) * 0.1; dt.requires_grad_()
+    A = -torch.rand(H, N, device=device).clamp_min(1e-3); A.requires_grad_()
+    Bp = torch.randn(B, T, N, device=device); Bp.requires_grad_()
     C = torch.randn(B, T, N, device=device)
     D = torch.randn(H, device=device)
 
