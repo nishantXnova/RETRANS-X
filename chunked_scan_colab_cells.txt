@@ -89,3 +89,49 @@ for chunk in (32, 64, 128, 256, 512, 1024):
     torch.cuda.synchronize()
     ms = (time.perf_counter() - t0) / 10 * 1000
     print(f'  C_CHUNK={chunk:>4}: {ms:7.2f} ms')
+
+
+# ===================== CELL 5 =====================
+# THE regime test: B=1, long T. If chain depth matters, chunked should win HERE.
+# (B=4/T<=16k has enough programs; B=1/T=65536 collapses fused to B*H=128 programs.)
+from triton_scan import bench_chunked
+
+print('=== B=1, T=32768 ===')
+bench_chunked(T=32768, H=128, N=8, B=1, iters=10)
+print()
+print('=== B=1, T=65536 ===')
+bench_chunked(T=65536, H=128, N=8, B=1, iters=5)
+print()
+# Chunk sweep at B=1, T=65536 (the decisive one)
+import torch, time
+
+device = 'cuda'
+B, T, H, N = 1, 65536, 128, 8
+torch.manual_seed(0)
+u = torch.randn(B, T, H, device=device).requires_grad_()
+dt = (torch.rand(B, T, H, device=device).clamp_min(1e-3) * 0.1).requires_grad_()
+A = (-torch.rand(H, N, device=device).clamp_min(1e-3)).requires_grad_()
+Bp = torch.randn(B, T, N, device=device).requires_grad_()
+C = torch.randn(B, T, N, device=device)
+D = torch.randn(H, device=device)
+
+def run(chunk):
+    h = ts.ChunkedSSMScanFn.apply(u, dt, A, Bp, T, chunk)
+    y = (h * C.unsqueeze(2)).sum(-1) + D * u
+    y.pow(2).mean().backward()
+    for t in (dt, A, Bp):
+        t.grad = None
+
+print(f'T={T} H={H} N={N} B={B}: fwd+bwd per C_CHUNK')
+for chunk in (64, 128, 256, 512, 1024, 2048):
+    if T % chunk:
+        continue
+    for _ in range(2):
+        run(chunk)
+    torch.cuda.synchronize()
+    t0 = time.perf_counter()
+    for _ in range(5):
+        run(chunk)
+    torch.cuda.synchronize()
+    ms = (time.perf_counter() - t0) / 5 * 1000
+    print(f'  C_CHUNK={chunk:>5}: {ms:7.2f} ms')
