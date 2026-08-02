@@ -159,9 +159,9 @@ for (B, T, H) in [(4, 4096, 128), (4, 16384, 128), (1, 8192, 128),
 #   D1) B=2,H=64,T=32768 (B*H=128, B=2): chunked 1.18x -> B*H is the driver, NOT B
 #   D2) B=1,T=8192:      chunked 1.18x -> no T floor in winning regime
 #   D3) B=1,T=4096:      chunked 1.24x -> no T floor in winning regime
-# Last gap: the B*H crossover sits between 128 (wins) and 256 (loses). Pin B*H=192:
-#   -> chunked wins  -> raise AUTO_MAX_BH to 192
-#   -> fused wins    -> keep 128
+# RESOLVED pin: B*H=192 LOSES (chunked 0.97x at B=1,H=192; 0.96x at B=3,H=64).
+#   Crossover is strictly in (128, 192). AUTO_MAX_BH=128 is the CONFIRMED
+#   ceiling, not a conservative guess. Keep 128 — no further probes needed.
 from triton_scan import bench_chunked
 
 print('=== Final pin: B*H=192 — raise AUTO_MAX_BH to 192? ===')

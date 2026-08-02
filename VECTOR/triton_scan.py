@@ -906,8 +906,9 @@ def chunked_triton_wrapped_scan(self, u, dt, A, B, C):
 # So the driver is B*H (occupancy: fused grid = B*H programs for N=8), NOT B
 # and NOT T: B=2/H=64 (B*H=128) chunks as well as B=1/H=128, and B*H=128 wins
 # at every T measured (no T floor — B=1 wins even at T=4096). The B*H
-# crossover is strictly between 128 (wins) and 256 (loses); AUTO_MAX_BH=128 is
-# the conservative verified setting (probe B*H=192 to raise it).
+# crossover is strictly between 128 (wins) and 192 (loses): B*H=192 probed at
+# both B=1/H=192 and B=3/H=64 gives fused 1.03-1.04x (chunked 0.96-0.97x), so
+# AUTO_MAX_BH=128 is the confirmed ceiling, not a conservative guess.
 #
 # AUTO_MAX_BH is a proxy for fused grid size and silently assumes N=8: the
 # fused grid is B*H*ceil(N/BLOCK_N) with BLOCK_N=min(32, next_pow2(N)); it
