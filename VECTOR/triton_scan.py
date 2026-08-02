@@ -896,20 +896,24 @@ def chunked_triton_wrapped_scan(self, u, dt, A, B, C):
 
 # Auto scan-path selection (shape-conditional at runtime).
 #
-# Benchmark data (T4, H=128, N=8):
-#   B*H=128 (B=1) T=16384/32768/65536: chunked wins  1.15-1.19x over fused
-#   B*H=256 (B=2) T=32768:              fused wins (chunked 0.87x)
-#   B*H=384 (B=3) T=32768:              fused barely (chunked 0.98x)
-#   B*H=512 (B=4) T<=16384:             fused wins (chunked 0.84-0.86x)
-# So the B*H crossover is strictly between 128 and 256 (boundary unmeasured:
-# probe B=1,H=192 to pin it), and chunked wins at least down to T=16384 at
-# B*H=128 (T floor unmeasured: probe B=1,T=8192 to pin it).
+# Benchmark data (T4, N=8). Chunked/fused ratio at scan-level fwd+bwd:
+#   B*H=128 (B=1,H=128 and B=2,H=64):  chunked wins at T=4096 (1.24x), 8192
+#     (1.18x), 16384 (1.16x), 32768 (1.15-1.18x), 65536 (1.19x)
+#   B*H=256 (B=2,H=128), T=32768:       fused wins (chunked 0.87x)
+#   B*H=384 (B=3,H=128), T=32768:       fused barely (chunked 0.98x)
+#   B*H=512 (B=4,H=128), T<=16384:      fused wins (chunked 0.84-0.86x)
+#
+# So the driver is B*H (occupancy: fused grid = B*H programs for N=8), NOT B
+# and NOT T: B=2/H=64 (B*H=128) chunks as well as B=1/H=128, and B*H=128 wins
+# at every T measured. The B*H crossover is strictly between 128 (wins) and
+# 256 (loses); AUTO_MAX_BH=128 is the conservative verified setting (probe
+# B*H=192 to raise it). AUTO_MIN_T is kept as a safety floor only.
 #
 # AUTO_MAX_BH is a proxy for fused grid size and silently assumes N=8: the
 # fused grid is B*H*ceil(N/BLOCK_N) with BLOCK_N=min(32, next_pow2(N)); it
 # collapses to B*H only because N=8 -> BLOCK_N=8 -> ceil(8/8)=1. If N is ever
 # increased, this threshold stops meaning what it means today — re-probe.
-AUTO_MIN_T = 16384   # lowest T with a verified chunked win at B*H=128
+AUTO_MIN_T = 4096    # safety floor only; B*H=128 wins at every T measured
 AUTO_MAX_BH = 128    # fused programs B*H at/below this -> occupancy-starved -> chunk
 
 
