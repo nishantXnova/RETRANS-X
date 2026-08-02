@@ -905,29 +905,42 @@ def chunked_triton_wrapped_scan(self, u, dt, A, B, C):
 #
 # So the driver is B*H (occupancy: fused grid = B*H programs for N=8), NOT B
 # and NOT T: B=2/H=64 (B*H=128) chunks as well as B=1/H=128, and B*H=128 wins
-# at every T measured. The B*H crossover is strictly between 128 (wins) and
-# 256 (loses); AUTO_MAX_BH=128 is the conservative verified setting (probe
-# B*H=192 to raise it). AUTO_MIN_T is kept as a safety floor only.
+# at every T measured (no T floor — B=1 wins even at T=4096). The B*H
+# crossover is strictly between 128 (wins) and 256 (loses); AUTO_MAX_BH=128 is
+# the conservative verified setting (probe B*H=192 to raise it).
 #
 # AUTO_MAX_BH is a proxy for fused grid size and silently assumes N=8: the
 # fused grid is B*H*ceil(N/BLOCK_N) with BLOCK_N=min(32, next_pow2(N)); it
 # collapses to B*H only because N=8 -> BLOCK_N=8 -> ceil(8/8)=1. If N is ever
 # increased, this threshold stops meaning what it means today — re-probe.
-AUTO_MIN_T = 4096    # safety floor only; B*H=128 wins at every T measured
 AUTO_MAX_BH = 128    # fused programs B*H at/below this -> occupancy-starved -> chunk
 
 
 def auto_scan_path(B, T, H):
     """Pick the scan path for a (B, T, H) input: 'chunked' or 'fused'."""
-    if T >= AUTO_MIN_T and B * H <= AUTO_MAX_BH and T % CHUNK_DEFAULT == 0:
+    if B * H <= AUTO_MAX_BH and T % CHUNK_DEFAULT == 0:
         return 'chunked'
     return 'fused'
+
+
+# Runtime dispatch tracer for auto mode. Training notebooks can set AUTO_TRACE
+# and read AUTO_PATH_LOG (or reset it) to confirm which path was actually picked
+# per step instead of trusting the threshold by eye.
+AUTO_TRACE = False
+AUTO_PATH_LOG = []  # list of (B, T, H, path) tuples, one entry per scan call
+
+
+def reset_auto_path_log():
+    AUTO_PATH_LOG.clear()
 
 
 def auto_triton_wrapped_scan(self, u, dt, A, B, C):
     D = self.D.to(u.dtype)
     B, T, H = u.shape
-    if auto_scan_path(B, T, H) == 'chunked':
+    path = auto_scan_path(B, T, H)
+    if AUTO_TRACE:
+        AUTO_PATH_LOG.append((B, T, H, path))
+    if path == 'chunked':
         h = ChunkedSSMScanFn.apply(u, dt, A, B, T, CHUNK_DEFAULT)
     else:
         h = FusedSSMScanFn.apply(u, dt, A, B, T)
@@ -944,8 +957,10 @@ def enable_triton(model, enabled: bool = True, fused: bool = False,
     chunked -> fused -> non-fused Triton. Call this after model creation.
 
     auto=True: pick fused vs chunked per-input-shape at runtime. Uses fused
-    for short T / larger batch (fused wins), chunked for long-T/low-B where
-    fused is occupancy-starved (benchmarked: B=1,T>=32768 -> 1.2x over fused).
+    for large B*H (fused is occupancy-starved at low B*H and loses ~15-35%),
+    chunked for B*H <= AUTO_MAX_BH where chunked wins at every T measured
+    (benchmarked on T4, N=8: B*H=128 -> 1.15-1.24x over fused at T=4096..65536;
+    B*H>=256 -> fused wins). No T floor: chunked wins even at T=4096.
 
     chunked=True engages the two-level scan only when the model's block_size
     >= chunked_threshold (benchmarked: chunked beats fused at long T/low B,

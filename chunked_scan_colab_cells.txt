@@ -139,22 +139,23 @@ for chunk in (64, 128, 256, 512, 1024, 2048):
 
 # ===================== CELL 6 =====================
 # Sanity-check the shape-conditional dispatch (auto_scan_path)
-from triton_scan import auto_scan_path, AUTO_MIN_T, AUTO_MAX_BH
+from triton_scan import auto_scan_path, AUTO_MAX_BH
 
-print(f'Rule: chunked iff T >= {AUTO_MIN_T} and B*H <= {AUTO_MAX_BH} (and T%128==0)')
+print(f'Rule: chunked iff B*H <= {AUTO_MAX_BH} (and T%128==0)')
 for (B, T, H) in [(4, 4096, 128), (4, 16384, 128), (1, 8192, 128),
                   (1, 32768, 128), (1, 65536, 128), (2, 65536, 64)]:
     print(f'  B={B:>2} T={T:>6} H={H:>3} -> {auto_scan_path(B, T, H)}')
 
 # ===================== CELL 7 =====================
 # RESOLVED: old rule (MIN_T=32768/MAX_BH=256) was WRONG at 2 of 3 points.
-# Corrected to MIN_T=4096/MAX_BH=128 based on CELL 8 results. Pattern:
+# Corrected to MAX_BH=128, MIN_T dropped entirely (B*H=128 wins at T=4096,
+# the shortest measured; no T floor exists in the winning regime). Pattern:
 # B*H=128 always wins (B=1 any T, and B=2/H=64), B*H>=256 loses/ties.
 # See CELL 8 for the B*H=192 pin.
 
 
 # ===================== CELL 8 =====================
-# RESOLVED disambiguation + short-T (thresholds now AUTO_MIN_T=4096, AUTO_MAX_BH=128):
+# RESOLVED disambiguation + short-T (thresholds now AUTO_MAX_BH=128, no T floor):
 #   D1) B=2,H=64,T=32768 (B*H=128, B=2): chunked 1.18x -> B*H is the driver, NOT B
 #   D2) B=1,T=8192:      chunked 1.18x -> no T floor in winning regime
 #   D3) B=1,T=4096:      chunked 1.24x -> no T floor in winning regime
