@@ -896,20 +896,21 @@ def chunked_triton_wrapped_scan(self, u, dt, A, B, C):
 
 # Auto scan-path selection (shape-conditional at runtime).
 #
-# Benchmark data: chunked beats fused exactly where fused is occupancy-starved.
-# Fused grid = (B, H) programs (N fits in one block with BLOCK_N). At B=1,H=128
-# that is 128 programs — far below the T4's warp slots — and chunking jumps to
-# thousands of programs, giving 1.21-1.22x over fused at T=32768/65536. At
-# B=4,H=128 (512 programs) fused is already past the occupancy threshold and
-# chunked only adds materialization overhead (0.85-0.87x). Chunk size within a
-# wide range doesn't matter once past the threshold, so CHUNK_DEFAULT=128 is fine.
-AUTO_MIN_T = 32768   # below this, chain depth is cheap -> use fused
-# NOTE: AUTO_MAX_BH is a proxy for fused grid size, and it silently assumes
-# N=8. Fused grid is B*H*ceil(N/BLOCK_N) with BLOCK_N=min(32, next_pow2(N));
-# it collapses to B*H only because N=8 -> BLOCK_N=8 -> ceil(8/8)=1. If N is
-# ever increased, the effective program count changes and this threshold stops
-# meaning what it means today — re-probe the crossover before relying on it.
-AUTO_MAX_BH = 256    # fused programs B*H at/below this -> occupancy-starved -> chunk
+# Benchmark data (T4, H=128, N=8):
+#   B*H=128 (B=1) T=16384/32768/65536: chunked wins  1.15-1.19x over fused
+#   B*H=256 (B=2) T=32768:              fused wins (chunked 0.87x)
+#   B*H=384 (B=3) T=32768:              fused barely (chunked 0.98x)
+#   B*H=512 (B=4) T<=16384:             fused wins (chunked 0.84-0.86x)
+# So the B*H crossover is strictly between 128 and 256 (boundary unmeasured:
+# probe B=1,H=192 to pin it), and chunked wins at least down to T=16384 at
+# B*H=128 (T floor unmeasured: probe B=1,T=8192 to pin it).
+#
+# AUTO_MAX_BH is a proxy for fused grid size and silently assumes N=8: the
+# fused grid is B*H*ceil(N/BLOCK_N) with BLOCK_N=min(32, next_pow2(N)); it
+# collapses to B*H only because N=8 -> BLOCK_N=8 -> ceil(8/8)=1. If N is ever
+# increased, this threshold stops meaning what it means today — re-probe.
+AUTO_MIN_T = 16384   # lowest T with a verified chunked win at B*H=128
+AUTO_MAX_BH = 128    # fused programs B*H at/below this -> occupancy-starved -> chunk
 
 
 def auto_scan_path(B, T, H):
