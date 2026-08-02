@@ -310,7 +310,7 @@ if HAS_TRITON:
         ac_base = out_acum_ptr + pid_b * stride_ac_b + pid_h * stride_ac_h + n_offs
     
         h = tl.zeros([BLOCK_N], dtype=tl.float32)
-        acum = tl.ones([BLOCK_N], dtype=tl.float32)
+        acum = tl.full([BLOCK_N], 1.0, dtype=tl.float32)
     
         for i in range(C_CHUNK):
             t = t0 + i
