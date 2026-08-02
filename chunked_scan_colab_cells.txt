@@ -147,23 +147,31 @@ for (B, T, H) in [(4, 4096, 128), (4, 16384, 128), (1, 8192, 128),
     print(f'  B={B:>2} T={T:>6} H={H:>3} -> {auto_scan_path(B, T, H)}')
 
 # ===================== CELL 7 =====================
-# RESOLVED boundary probes (results reflected in AUTO_MIN_T=16384, AUTO_MAX_BH=128):
-#   Probe 1  B=2,H=128,T=32768 (B*H=256): chunked 0.87x -> fused wins  -> BH=256 is TOO HIGH
-#   Probe 2  B=1,T=16384       : chunked 1.16x -> chunked wins -> T=32768 is TOO HIGH
-#   Probe 3  B=3,H=128,T=32768 (B*H=384): chunked 0.98x -> fused barely wins
-# Result: verified chunked-win regime is B*H<=128, T>=16384.
-# (Pinning the two unmeasured gaps: B*H in (128,256) and T<16384.)
+# RESOLVED boundary probes (old rule AUTO_MIN_T=32768/AUTO_MAX_BH=256 was WRONG
+# at 2 of 3 points; thresholds now MIN_T=16384/MAX_BH=128 but see CELL 8):
+#   Probe 1  B=2,H=128,T=32768 (B*H=256): chunked 0.87x -> fused wins  (rule said chunked)
+#   Probe 2  B=1,T=16384       : chunked 1.16x -> chunked wins (rule said fused)
+#   Probe 3  B=3,H=128,T=32768 (B*H=384): chunked 0.98x -> fused barely (rule ok)
+# Pattern: B=1 always wins (any T 16384-65536), B>1 loses/ties (any T). Might be
+# B==1, not B*H. Do NOT trust auto=True for training until CELL 8 disambiguates.
 
 
 # ===================== CELL 8 =====================
-# PIN probes: measure the two gaps instead of interpolating.
-#   A) B=1, H=192, T=32768 (B*H=192, between verified 128-wins and 256-loses)
-#      -> if chunked wins here, AUTO_MAX_BH can go to 192
-#   B) B=1, T=8192 (B*H=128, below the T floor) -> if fused wins, floor is right
+# DISAMBIGUATION: is the rule B*H or is it B==1?
+# Every winning point so far happens to have B=1, so B*H and B are confounded.
+#   D1) B=2, H=64, T=32768 -> B*H=128 (same as winning B=1/H=128) but B=2.
+#       chunked wins  -> B*H is the real proxy (threshold ~128-192)
+#       chunked loses -> it's B specifically; replace the proxy
+# Short-T check for B=1 (does the win hold, or is there a real floor?):
+#   D2) B=1, T=8192, H=128
+#   D3) B=1, T=4096, H=128
 from triton_scan import bench_chunked
 
-print('=== Pin A: B=1, H=192, T=32768 (B*H=192, midpoint of the BH gap) ===')
-bench_chunked(T=32768, H=192, N=8, B=1, iters=10)
+print('=== D1: B=2, H=64, T=32768 (B*H=128 but B=2) — THE decider ===')
+bench_chunked(T=32768, H=64, N=8, B=2, iters=10)
 print()
-print('=== Pin B: B=1, T=8192 (B*H=128, below AUTO_MIN_T) ===')
+print('=== D2: B=1, T=8192 (short T, B=1) ===')
 bench_chunked(T=8192, H=128, N=8, B=1, iters=10)
+print()
+print('=== D3: B=1, T=4096 (short T, B=1) ===')
+bench_chunked(T=4096, H=128, N=8, B=1, iters=10)
