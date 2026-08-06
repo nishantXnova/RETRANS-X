@@ -384,23 +384,19 @@ m_t = STE(s_t &gt; 0.5)</div>
   </div>
 
   <h3>5.4 GPU Training Run (Colab T4)</h3>
-  <p>Stream 4L/128D (0.85M params) trained on TinyStories bytes. Two runs at T=4096 (B=4) comparing JIT vs Triton scan, plus a T=16384 run (B=2) enabled by the Triton speedup.</p>
-
-  <div class="note" style="border-color:var(--orange);">
-    <strong>⚠ Re-measuring.</strong> The <em>Triton</em> training timings below were logged <strong>before</strong> a missing <code>torch.cuda.synchronize()</code> was fixed — they measured CPU scheduling time, not GPU completion. The <strong>~12 ms/iter, 73×, 1.38M–2.77M tok/s</strong> figures are <strong>stale and unreliable</strong>. End-to-end fwd+bwd is being re-measured with honest timing; this section updates when the rerun completes.
-  </div>
+  <p>Stream 4L/128D (0.85M params), end-to-end training step (fwd+bwd) at B=4, measured on Colab T4 with a <code>torch.cuda.synchronize()</code> around every batch so timings reflect GPU completion, not CPU scheduling. Each row is a fresh model; five measured iterations per row.</p>
 
   <table>
-    <thead><tr><th>Metric</th><th>JIT T=4096</th><th>Triton T=4096</th><th>Triton T=16384</th></tr></thead>
+    <thead><tr><th>Mode</th><th>B×T</th><th>ms/iter</th><th>Throughput</th><th>vs JIT @4096</th></tr></thead>
     <tbody>
-      <tr><td>Time per iter</td><td>~875 ms</td><td>~12 ms <span style="color:var(--orange);">(stale)</span></td><td>~12 ms <span style="color:var(--orange);">(stale)</span></td></tr>
-      <tr><td>Speedup vs JIT</td><td>1×</td><td><span style="color:var(--orange);">73× (stale)</span></td><td><span style="color:var(--orange);">73× (stale)</span></td></tr>
-      <tr><td>Tokens/iter</td><td>16,384</td><td>16,384</td><td>32,768</td></tr>
-      <tr><td>Throughput</td><td>18K tok/s</td><td>1.38M tok/s <span style="color:var(--orange);">(stale)</span></td><td>2.77M tok/s <span style="color:var(--orange);">(stale)</span></td></tr>
-      <tr><td>Final val loss</td><td>2.36</td><td>2.44</td><td>2.40</td></tr>
+      <tr><td>JIT</td><td>4×4096</td><td>1146.7 ms</td><td>14.3K tok/s</td><td>1×</td></tr>
+      <tr><td>Triton (fused)</td><td>4×4096</td><td>226.7 ms</td><td>72.3K tok/s</td><td><strong>5.06×</strong></td></tr>
+      <tr><td>Auto (fused path)</td><td>4×4096</td><td>230.3 ms</td><td>71.1K tok/s</td><td><strong>4.98×</strong></td></tr>
+      <tr><td>Triton (fused)</td><td>4×16384</td><td>955.3 ms</td><td>68.6K tok/s</td><td>1.20×</td></tr>
+      <tr><td>Auto (fused path)</td><td>4×16384</td><td>962.5 ms</td><td>68.1K tok/s</td><td>1.19×</td></tr>
     </tbody>
   </table>
-  <div class="note">Losses are within expected batch variance (all ~2.4). O(n) means longer sequences cost linearly, not quadratically — the asymptotic claim stands, but the <em>absolute</em> training throughput numbers above are stale (see warning). Triton scan is numerically equivalent to JIT (&lt;2e-4 max diff).</div>
+  <div class="note"><strong>Honest numbers.</strong> The Triton kernel delivers a real <strong>~5× end-to-end (fwd+bwd) speedup</strong> over JIT at T=4096 — not the 73× that came from only timing CPU dispatch before the synchronize fix. The O(n) claim holds on hardware: throughput stays flat at ~70K tok/s from T=4096 to T=16384 (no quadratic blow-up), and Triton at T=16384 is still <strong>1.2× faster than JIT at T=4096</strong> while processing 4× the tokens. All rows here have B·H ≥ 128, so Triton takes the fused path; the chunked path engages only at B·H ≤ 128 and was verified equivalent (CELL 10 patched the auto wrapper's B-shadowing bug, diff &lt;1e-4). These are single-batch-per-iteration timings on a streaming workload, so <em>absolute</em> tok/s are modest — the headline is the honest ~5× kernel speedup and flat O(n) throughput.</div>
 
   <h3>5.5 Stream vs GPT: O(n) vs O(n²) — Full GPU Benchmark</h3>
   <p>Matched ~0.7M parameter models on Colab T4. Stream's throughput is <strong>flat at ~228K tok/s across all sequence lengths</strong> — perfect O(n) scaling. GPT peaks at T=1024 then decays quadratically.</p>
@@ -493,6 +489,41 @@ m_t = STE(s_t &gt; 0.5)</div>
     <li><strong>Shipped the corrected rule</strong>: <code>auto_scan_path</code> now picks chunked when <code>B·H≤128</code>, fused otherwise, with no T threshold — fully backed by measured data rather than interpolated guesses, with the fallback chain (chunked→fused→non-fused) still intact for safety.</li>
   </ol>
   <div class="note"><strong>Result:</strong> B·H=128 chunked wins 1.15–1.24x over fused at every T from 4096 to 65536; B·H=192 loses (0.96–0.97x). The shipped rule needs no further probing.</div>
+
+  <h3>5.10 Muon Optimizer (Keller Jordan) — Validated on Colab T4</h3>
+  <p>Hybrid optimizer on Stream: <strong>Muon</strong> (momentum orthogonalized by a quintic Newton–Schulz iteration) for <code>nn.Linear</code> weights, <strong>AdamW</strong> for everything else (embeddings, <code>A_log</code>, <code>D</code>, norms, biases). Validation harness ANDs every sub-check into a single verdict — no swallowed failures. All numbers below are from synchronized T4 runs.</p>
+
+  <p><strong>Two real bugs found and fixed during validation (not assumed correct):</strong></p>
+  <ol>
+    <li><strong>Square-matrix collapse.</strong> 5-step NS drives a <em>square</em> matrix's smallest singular value to ~0.002 (the smallest singular value of a square Gaussian tends to zero, and the iteration amplifies bf16 rounding) — silently distorting that gradient direction every step. Stream's default config hits this for real: <code>dt_proj = Linear(hidden, hidden)</code> is square (512×512) and Muon-partitioned. Fixed: square inputs use <strong>14 steps</strong> (worst-case floor ~0.68 vs 0.13 at 10 steps), rectangular keep 5.</li>
+    <li><strong>bf16 scale-invariance breakage.</strong> Quantizing to bf16 <em>before</em> normalization put <code>NS(G)</code> and <code>NS(3G)</code> on different bf16 grids; the iteration amplified that to ~30% relative difference on small matrices. Fixed: the input scale is removed in fp32 <em>before</em> the bf16 cast. Scale-invariance relative error dropped to ~1e-3.</li>
+  </ol>
+
+  <p><strong>NS correctness (CELL 11, multi-draw, PASS):</strong> singular values land in [0.668, 1.149] for square and [0.672, 1.141] for rectangular — a valid near-unitary preconditioner. bf16 square NS is approximate: the weakest direction can carry ~0.2–0.5× weight on rare draws (benign for a preconditioner; the guard is collapse). Partition: 25 Muon params (4.293M) / 39 AdamW params (0.137M). 60-step stability: loss 5.5576 → 3.3938.</p>
+
+  <table>
+    <thead><tr><th>Optimizer</th><th>per-step median</th><th>mean</th><th>trimmed</th><th>p90–p10</th></tr></thead>
+    <tbody>
+      <tr><td>AdamW</td><td>76.9 ms</td><td>89.0 ms</td><td>84.9 ms</td><td>44.5 ms</td></tr>
+      <tr><td>MuonAdamW</td><td>94.7 ms</td><td>106.8 ms</td><td>102.2 ms</td><td>54.7 ms</td></tr>
+    </tbody>
+  </table>
+  <div class="note"><strong>Per-step overhead: 1.23× (median), 1.20× (mean)</strong> — 300 matched steps, first 15 dropped as warmup, median primary because shared-GPU scheduler noise skews the mean. Muon is <em>not</em> free per step; its win is convergence speed, not step cost.</div>
+
+  <table>
+    <thead><tr><th>step</th><th>AdamW loss</th><th>Muon loss</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td>5.5658</td><td>5.5658</td></tr>
+      <tr><td>51</td><td>3.9486</td><td style="color:var(--green);">1.2919</td></tr>
+      <tr><td>101</td><td>2.1446</td><td style="color:var(--green);">0.0061</td></tr>
+      <tr><td>151</td><td>0.3933</td><td style="color:var(--green);">0.0005</td></tr>
+      <tr><td>201</td><td>0.0570</td><td style="color:var(--green);">0.0060</td></tr>
+      <tr><td>251</td><td>0.0137</td><td style="color:var(--green);">0.0001</td></tr>
+    </tbody>
+  </table>
+  <div class="note"><strong>Matched wall-clock (300 AdamW steps at median):</strong> Muon gets ~243 steps and reaches loss <strong>0.0001</strong> vs AdamW <strong>0.0040</strong> at 300 — Muon converges far faster on this scale despite the 1.2× per-step cost.</div>
+
+  <div class="note" style="border-color:var(--orange);"><strong>Caveats (read before citing):</strong> (1) This is a <strong>toy/sanity scale</strong> — 4L/128D on a tiny/synthetic byte task; a loss of ~0.0001 means the task is nearly memorized, and says nothing about production-scale convergence. (2) Muon's per-step cost is ~1.2× AdamW's (median), not free. (3) NS is deliberately bf16 and approximate; the validation asserts it stays a near-unitary preconditioner, not that it is exactly orthogonal.</div>
 </section>
 
 <!-- MoE-Stream Link -->

@@ -298,3 +298,468 @@ for B in (2, 4):
     print(f'  auto B*H={B*H} -> {label}: worst diff {worst:.2e} {"OK" if worst < 1e-4 else "FAIL"}')
 print('WRAPPER CHECK:', 'PASS' if ok else 'FAIL')
 print('Now re-run CELL 9 for the honest §5.4 timings (auto rows will work).')
+
+
+# ===================== CELL 11 =====================
+# Muon optimizer (Keller Jordan NS5): correctness + partition sanity + stability.
+# Self-contained: loads muon.py and model.py from VECTOR.
+import os, sys, importlib, math
+import torch
+
+# muon.py is UNTRACKED (not in the git clone), so bootstrap it from the
+# embedded source below. Runs on EVERY execution (no 'not in globals' guard)
+# and force-reimports, so code fixes actually take effect when re-run in the
+# same kernel.
+_MUON_SRC = r'''"""
+Muon optimizer (Keller Jordan) for RETRANS-X.
+
+Muon = Momentum orthogonalized by Newton-Schulz. It runs SGD-momentum and then
+replaces each 2D update with the nearest orthogonal matrix via a quintic
+Newton-Schulz iteration, computed in bfloat16 for GPU efficiency.
+
+It applies only to 2D matmul weights (nn.Linear). Embeddings, biases, norm
+weights and non-Linear parameters (e.g. A_log, D) are trained by AdamW through
+the MuonAdamW hybrid wrapper.
+
+References:
+  https://kellerjordan.github.io/posts/muon/
+  modded-nanogpt train_gpt2.py (pinned commit 9730304)
+"""
+
+import inspect
+
+import torch
+import torch.nn as nn
+
+
+_NS_STEPS_RECT = 5      # provably robust for every non-square matrix
+_NS_STEPS_SQUARE = 14   # square matrices need ~14 steps (see docstring)
+
+
+@torch.no_grad()
+def zeropower_via_newtonschulz5(G: torch.Tensor, steps: int = 5, eps: float = 1e-7) -> torch.Tensor:
+    """Newton-Schulz quintic iteration for the zeroth power (orthogonal factor) of a 2D matrix.
+
+    Runs in bfloat16. The matrix is transposed to rows <= cols so the polynomial
+    approximation stays well-conditioned, then restored to the original orientation.
+
+    Step count is shape-dependent (measured on this repo, 100+ random draws):
+      * non-square (ratio >= 1.25, the dominant case: in_proj/out_proj are 2:1,
+        x_proj 8:1, head wide): 5 steps lands singular values in ~[0.68, 1.13]
+        every draw.
+      * square (ratio 1.0): 5 steps can collapse the smallest singular value to
+        ~0.002 (the smallest singular value of a square Gaussian tends to zero,
+        and bf16 rounding amplifies it), silently distorting that gradient
+        direction every step. 10 steps still lets the 512x512 (the real dt_proj
+        size) tail dip to ~0.13 in worst-case bf16 and ~0.29 on real GPU draws.
+        14 steps raises the worst-case floor to ~0.68 in emulation and is the
+        number used here. bf16 square NS is not exact orthogonalization: the
+        weakest direction can still carry ~0.2-0.5x weight on rare draws, which
+        is benign for a gradient preconditioner (the guard is collapse, ~0.002).
+
+    Stream's default config DOES hit the square case: dt_proj = Linear(hidden,
+    hidden) is nn.Linear and therefore Muon-partitioned. Keep this step bump if
+    model dims ever change (a future config where any two dims match re-enters
+    the square path). An external caller may override steps via the parameter.
+
+    The input scale is removed in fp32 BEFORE the bf16 cast. Quantizing first
+    (G.bfloat16() then normalize) puts NS(G) and NS(3G) on different bf16 grids;
+    the iteration then amplifies that mismatch to up to ~30% relative difference
+    on small square matrices. Normalizing in fp32 first makes NS scale-invariant
+    to ~1e-3 (bf16) instead of ~5e-2..3e-1, at no cost to the bf16 matmuls.
+    """
+    assert len(G.shape) == 2
+    if G.size(0) == G.size(1):
+        steps = max(steps, _NS_STEPS_SQUARE)
+    a, b, c = (3.4445, -4.7750, 2.0315)
+    X = G.float()
+    X = X / (X.norm() + eps)  # remove input scale in fp32, then quantize
+    X = X.bfloat16()
+    if G.size(0) > G.size(1):
+        X = X.T
+    for _ in range(steps):
+        A = X @ X.T
+        B = b * A + c * A @ A
+        X = a * X + B @ X
+    if G.size(0) > G.size(1):
+        X = X.T
+    return X
+
+
+class Muon(torch.optim.Optimizer):
+    """Momentum orthogonalized by Newton-Schulz.
+
+    All parameters passed in must be 2D matrices. Do not pass embeddings, the
+    final projection, or any 0/1-D parameter; those go through AdamW.
+    """
+
+    def __init__(self, params, lr=0.02, momentum=0.95, nesterov=True, ns_steps=5):
+        defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, ns_steps=ns_steps)
+        super().__init__(params, defaults)
+
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+        for group in self.param_groups:
+            momentum = group['momentum']
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+                g = p.grad
+                state = self.state[p]
+                if 'momentum_buffer' not in state:
+                    state['momentum_buffer'] = torch.zeros_like(g)
+                buf = state['momentum_buffer']
+                buf.mul_(momentum).add_(g)
+                if group['nesterov']:
+                    g = g.add(buf, alpha=momentum)
+                else:
+                    g = buf
+                g = zeropower_via_newtonschulz5(g, steps=group['ns_steps'])
+                g = g * max(1, g.size(0) / g.size(1)) ** 0.5
+                p.data.add_(g.to(p.data.dtype, copy=False), alpha=-group['lr'])
+        return loss
+
+
+def partition_params(model, include_embeddings=False):
+    """Split trainable parameters into (muon_params, adamw_params).
+
+    Muon handles nn.Linear weight matrices; everything else (embeddings, biases,
+    norm weights, non-Linear params such as A_log/D) goes to AdamW.
+    """
+    muon = []
+    seen = set()
+    for _, m in model.named_modules():
+        if isinstance(m, nn.Linear) and m.weight is not None and m.weight.requires_grad:
+            muon.append(m.weight)
+            seen.add(id(m.weight))
+    if include_embeddings:
+        for _, m in model.named_modules():
+            if isinstance(m, nn.Embedding) and m.weight is not None and m.weight.requires_grad:
+                muon.append(m.weight)
+                seen.add(id(m.weight))
+    adamw = [p for p in model.parameters() if p.requires_grad and id(p) not in seen]
+    return muon, adamw
+
+
+class MuonAdamW:
+    """Hybrid optimizer: Muon for nn.Linear weights, AdamW for everything else.
+
+    Exposes the torch.optim.Optimizer surface (param_groups, step, zero_grad,
+    state_dict, load_state_dict) so it can drop into existing training loops.
+
+    NOTE: an external LR schedule that overwrites every param_group['lr'] will
+    also overwrite the Muon lr; schedule Muon and AdamW lrs explicitly.
+    """
+
+    def __init__(self, model, muon_lr=0.02, adamw_lr=6e-4, momentum=0.95, nesterov=True,
+                 ns_steps=5, weight_decay=0.1, betas=(0.9, 0.95), device_type='cpu',
+                 include_embeddings=False):
+        muon_params, adamw_params = partition_params(model, include_embeddings=include_embeddings)
+        self.muon = None
+        self.adamw = None
+        self.optimizers = []
+        if muon_params:
+            self.muon = Muon(muon_params, lr=muon_lr, momentum=momentum,
+                             nesterov=nesterov, ns_steps=ns_steps)
+            self.optimizers.append(self.muon)
+        groups = []
+        decay = [p for p in adamw_params if p.dim() >= 2]
+        nodecay = [p for p in adamw_params if p.dim() < 2]
+        if decay:
+            groups.append({'params': decay, 'weight_decay': weight_decay})
+        if nodecay:
+            groups.append({'params': nodecay, 'weight_decay': 0.0})
+        if groups:
+            fused = ('fused' in inspect.signature(torch.optim.AdamW).parameters
+                     and device_type == 'cuda')
+            self.adamw = torch.optim.AdamW(groups, lr=adamw_lr, betas=betas, fused=fused)
+            self.optimizers.append(self.adamw)
+        if not self.optimizers:
+            raise ValueError('no trainable parameters found')
+
+    @property
+    def param_groups(self):
+        return [pg for opt in self.optimizers for pg in opt.param_groups]
+
+    def step(self, closure=None):
+        for opt in self.optimizers:
+            opt.step(closure)
+
+    def zero_grad(self, set_to_none=True):
+        for opt in self.optimizers:
+            opt.zero_grad(set_to_none=set_to_none)
+
+    def state_dict(self):
+        return [opt.state_dict() for opt in self.optimizers]
+
+    def load_state_dict(self, state):
+        for opt, s in zip(self.optimizers, state):
+            opt.load_state_dict(s)
+'''
+_vd = None
+for _p in [os.getcwd(), '/content/RETRANS-X', '/content']:
+    _v = os.path.join(_p, 'VECTOR')
+    if os.path.isdir(_v): _vd = _v; break
+if _vd is None:
+    raise RuntimeError('no VECTOR/ dir found - run CELL 1 (clone) first')
+with open(os.path.join(_vd, 'muon.py'), 'w', encoding='utf-8') as _f:
+    _f.write(_MUON_SRC)
+sys.path.insert(0, _vd)
+sys.modules.pop('muon', None)   # drop cached module, then re-import fresh
+muon_mod = importlib.import_module('muon')
+# hard-confirm the loaded module carries the fixes (fails loudly otherwise)
+assert getattr(muon_mod, '_NS_STEPS_SQUARE', None) == 14, 'square 14-step fix missing'
+assert 'fp32' in (muon_mod.zeropower_via_newtonschulz5.__doc__ or ''), 'normalize-first fix missing'
+print('muon.py loaded: square 14-step + fp32-normalize-first fix active')
+if 'md' not in globals():
+    _vd = None
+    for _p in [os.getcwd(), '/content/RETRANS-X', '/content']:
+        _v = os.path.join(_p, 'VECTOR')
+        if os.path.isfile(os.path.join(_v, 'model.py')): _vd = _v; break
+    if _vd is None:
+        for _p in [os.getcwd(), '/content/RETRANS-X', '/content']:
+            if os.path.isdir(os.path.join(_p, 'VECTOR')): _vd = os.path.join(_p, 'VECTOR'); break
+        if _vd is None:
+            raise RuntimeError('no VECTOR/ dir found - run CELL 1 (clone) first')
+    sys.path.insert(0, _vd)
+    md = importlib.util.module_from_spec(
+        (s := importlib.util.spec_from_file_location('md', os.path.join(_vd, 'model.py')))
+    ); s.loader.exec_module(md)
+
+# --- 1) NS: singular values in ~[0.5, 1.5], finite, scale-invariant (multi-draw) ---
+# Every sub-check is folded into CELL 11 FINAL. Square 256x256 is the REAL case:
+# dt_proj = Linear(hidden, hidden) is nn.Linear -> Muon-partitioned and square.
+# zeropower_via_newtonschulz5 must bump square inputs to 10 steps; this test
+# catches a silent collapse to sv~0 (which 5-step NS produces on square inputs).
+results = []
+
+def _band(p):
+    sv = torch.linalg.svdvals(p.float()).cpu()
+    return sv.min().item(), sv.max().item()
+
+# square: 14-step bf16 NS. The band [0.2, 1.5] is deliberate: worst-case bf16
+# can leave the WEAKEST direction at ~0.2-0.5x weight on rare draws (benign for
+# a preconditioner); the real danger this guards against is the 5-step collapse
+# to ~0.002 (direction zeroed). 0.2 sits 100x above that and below every
+# measured 14-step floor (0.68 worst-case emulation at 256x256 and 512x512).
+for shape, ndraws, tag, lo, hi in [((64, 64), 10, 'square 64x64', 0.2, 1.5),
+                                   ((256, 256), 10, 'square 256x256', 0.2, 1.5)]:
+    svmn, svmx, fin, rel = 9.0, 0.0, True, 0.0
+    torch.manual_seed(0)
+    for d in range(ndraws):
+        G = torch.randn(*shape, device='cuda')
+        P = muon_mod.zeropower_via_newtonschulz5(G)
+        P2 = muon_mod.zeropower_via_newtonschulz5(3 * G)
+        mn, mx = _band(P)
+        svmn, svmx = min(svmn, mn), max(svmx, mx)
+        fin = fin and bool(torch.isfinite(P).all())
+        rel = max(rel, (P.float() - P2.float()).norm().item() / (P.float().norm().item() + 1e-9))
+    ok = (lo <= svmn) and (svmx <= hi) and fin and (rel < 0.1)
+    # rel floor: bf16 NS is deliberately bf16 (tensor cores); fp32 would give ~1e-6
+    print(f'  {"OK " if ok else "FAIL"} NS {tag} (n={ndraws}): sv in [{svmn:.3f},{svmx:.3f}], '
+          f'finite={fin}, worst scale-inv rel={rel:.2e}')
+    results.append(('NS ' + tag, ok))
+
+# rectangular: dominant case (in_proj/out_proj 2:1, x_proj 8:1, head wide); 5-step
+# floor is 0.682, so the stricter [0.5, 1.5] band is honest for these.
+for shape, ndraws, tag, lo, hi in [((128, 32), 10, 'rect 128x32', 0.5, 1.5),
+                                   ((128, 256), 10, 'rect 128x256', 0.5, 1.5)]:
+    svmn, svmx, fin, rel = 9.0, 0.0, True, 0.0
+    torch.manual_seed(0)
+    for d in range(ndraws):
+        G = torch.randn(*shape, device='cuda')
+        P = muon_mod.zeropower_via_newtonschulz5(G)
+        P2 = muon_mod.zeropower_via_newtonschulz5(3 * G)
+        mn, mx = _band(P)
+        svmn, svmx = min(svmn, mn), max(svmx, mx)
+        fin = fin and bool(torch.isfinite(P).all())
+        rel = max(rel, (P.float() - P2.float()).norm().item() / (P.float().norm().item() + 1e-9))
+    ok = (lo <= svmn) and (svmx <= hi) and fin and (rel < 0.1)
+    print(f'  {"OK " if ok else "FAIL"} NS {tag} (n={ndraws}): sv in [{svmn:.3f},{svmx:.3f}], '
+          f'finite={fin}, worst scale-inv rel={rel:.2e}')
+    results.append(('NS ' + tag, ok))
+
+# --- 2) Partition sanity on the real Stream model + shape audit ---
+# Every Muon param shape is printed so a future dim change that creates a new
+# square matrix (or removes the existing dt_proj square) is visible in the log.
+m = md.Stream(md.StreamConfig()).cuda()
+muon_params, adamw_params = muon_mod.partition_params(m)
+muon_ids = {id(p) for p in muon_params}
+named = dict(m.named_parameters())
+in_muon = lambda name: id(named[name]) in muon_ids
+checks = {
+    'blocks.0.in_proj.weight in muon': in_muon('blocks.0.in_proj.weight'),
+    'blocks.0.out_proj.weight in muon': in_muon('blocks.0.out_proj.weight'),
+    'head.weight in muon': in_muon('head.weight'),
+    'byte_embed.weight NOT in muon': not in_muon('byte_embed.weight'),
+    'blocks.0.A_log NOT in muon': not in_muon('blocks.0.A_log'),
+    'blocks.0.D NOT in muon': not in_muon('blocks.0.D'),
+    'blocks.0.ln.weight NOT in muon': not in_muon('blocks.0.ln.weight'),
+    'blocks.0.conv1d.weight NOT in muon': not in_muon('blocks.0.conv1d.weight'),
+    'no param in both': len(muon_params) + len(adamw_params) == sum(
+        1 for p in m.parameters() if p.requires_grad),
+    'at least one square muon param (exercises square NS)': any(
+        p.shape[0] == p.shape[1] for p in muon_params),
+}
+allok = all(checks.values())
+for k, v in checks.items():
+    print(f'  {"OK " if v else "FAIL"} {k}')
+for p in muon_params:
+    sq = ' <-- SQUARE: uses 14-step NS' if p.shape[0] == p.shape[1] else ''
+    print(f'  muon shape {tuple(p.shape)}{sq}')
+print(f'  muon: {len(muon_params)} params ({sum(p.numel() for p in muon_params)/1e6:.3f}M) | '
+      f'adamw: {len(adamw_params)} params ({sum(p.numel() for p in adamw_params)/1e6:.3f}M)')
+print('PARTITION:', 'PASS' if allok else 'FAIL')
+results.append(('partition', allok))
+
+# --- 3) Stability: 60 steps, loss must decrease, no NaN ---
+torch.manual_seed(1)
+m2 = md.Stream(md.StreamConfig(n_embd=64, n_layer=2, ssm_d_state=8, n_predict=2)).cuda()
+opt = muon_mod.MuonAdamW(m2, muon_lr=0.02, adamw_lr=6e-4, device_type='cuda')
+m2.train()
+x = torch.randint(0, 256, (16, 256), device='cuda')
+y = torch.randint(0, 256, (16, 256), device='cuda')
+first = None
+for it in range(60):
+    _, loss = m2(x, targets=y)
+    loss.backward()
+    torch.nn.utils.clip_grad_norm_(m2.parameters(), 1.0)
+    opt.step()
+    opt.zero_grad(set_to_none=True)
+    if it == 0:
+        first = loss.item()
+last = loss.item()
+stable = (last < first) and math.isfinite(last)
+print(f'  {"OK " if stable else "FAIL"} stability: loss {first:.4f} -> {last:.4f}')
+results.append(('stability', stable))
+
+results.sort(key=lambda kv: kv[0])
+for name, ok in results:
+    print(f'  sub-check [{name}]: {"PASS" if ok else "FAIL"}')
+final = all(ok for _, ok in results)
+print('CELL 11 FINAL:', 'PASS' if final else 'FAIL')
+
+
+# ===================== CELL 12 =====================
+# Side-by-side: AdamW vs MuonAdamW on identical Stream models (matched steps +
+# matched wall-clock). Per-step timing uses torch.cuda.synchronize() — no fake
+# CPU-clock numbers. Self-contained: loads muon.py + model.py from VECTOR.
+import os, sys, importlib, time, math, statistics
+import torch
+
+# muon_mod is set by CELL 11 (bootstrapped there). If this cell is run alone,
+# require an existing muon.py rather than guessing.
+if 'muon_mod' not in globals():
+    _vd = None
+    for _p in [os.getcwd(), '/content/RETRANS-X', '/content']:
+        _v = os.path.join(_p, 'VECTOR')
+        if os.path.isfile(os.path.join(_v, 'muon.py')): _vd = _v; break
+    if _vd is None:
+        raise RuntimeError('muon.py not found - run CELL 11 first (it bootstraps muon.py)')
+    sys.path.insert(0, _vd)
+    sys.modules.pop('muon', None)
+    muon_mod = importlib.import_module('muon')
+if 'md' not in globals():
+    _vd = None
+    for _p in [os.getcwd(), '/content/RETRANS-X', '/content']:
+        _v = os.path.join(_p, 'VECTOR')
+        if os.path.isfile(os.path.join(_v, 'model.py')): _vd = _v; break
+    if _vd is None:
+        for _p in [os.getcwd(), '/content/RETRANS-X', '/content']:
+            if os.path.isdir(os.path.join(_p, 'VECTOR')): _vd = os.path.join(_p, 'VECTOR'); break
+        if _vd is None:
+            raise RuntimeError('no VECTOR/ dir found - run CELL 1 (clone) first')
+    sys.path.insert(0, _vd)
+    md = importlib.util.module_from_spec(
+        (s := importlib.util.spec_from_file_location('md', os.path.join(_vd, 'model.py')))
+    ); s.loader.exec_module(md)
+device = 'cuda'
+
+STEPS = 300
+WARMUP = 15   # first steps excluded from timing stats (JIT/warmup/GPU clocks)
+LOG = 50
+
+def make_model():
+    torch.manual_seed(0)
+    return md.Stream(md.StreamConfig(
+        n_embd=128, n_layer=4, ssm_d_state=8, n_predict=2,
+        block_size=256, dropout=0.0, bias=False,
+    )).cuda()
+
+def run_opt(make_opt, steps, data):
+    m = make_model()
+    m.train()
+    opt = make_opt(m)
+    xs, ys = data
+    losses, times = [], []
+    for it in range(steps):
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        _, loss = m(xs, targets=ys)
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(m.parameters(), 1.0)
+        opt.step()
+        opt.zero_grad(set_to_none=True)
+        torch.cuda.synchronize()
+        times.append(time.perf_counter() - t0)
+        losses.append(loss.item())
+    return losses, times
+
+torch.manual_seed(7)
+data = (torch.randint(0, 256, (8, 256), device=device),
+        torch.randint(0, 256, (8, 256), device=device))
+
+print('--- AdamW (lr=6e-4, wd=0.1 on 2D, betas (0.9,0.95)) ---')
+adamw_losses, adamw_times = run_opt(
+    lambda m: torch.optim.AdamW(
+        [{'params': [p for p in m.parameters() if p.dim() >= 2], 'weight_decay': 0.1},
+         {'params': [p for p in m.parameters() if p.dim() < 2], 'weight_decay': 0.0}],
+        lr=6e-4, betas=(0.9, 0.95), fused=True),
+    STEPS, data)
+
+print('--- MuonAdamW (muon_lr=0.02, adamw_lr=6e-4, wd=0.1) ---')
+muon_losses, muon_times = run_opt(
+    lambda m: muon_mod.MuonAdamW(m, muon_lr=0.02, adamw_lr=6e-4, device_type=device),
+    STEPS, data)
+
+def stat(times):
+    # Median is the primary stat: per-step wall-clock on a shared Colab GPU is
+    # skewed by scheduler contention, so mean is only reported alongside it.
+    ts_ = sorted(times[WARMUP:])
+    n = len(ts_)
+    med = ts_[n // 2] if n % 2 else (ts_[n // 2 - 1] + ts_[n // 2]) / 2
+    mean = sum(ts_) / n
+    k = max(1, int(0.1 * n))
+    trim = ts_[k:-k] if n - 2 * k >= 2 else ts_
+    tmean = sum(trim) / len(trim)
+    p90, p10 = ts_[min(n - 1, int(0.9 * n))], ts_[min(n - 1, int(0.1 * n))]
+    return med, mean, tmean, p90 - p10, n
+
+a_med, a_mean, a_tmean, a_spread, n_used = stat(adamw_times)
+m_med, m_mean, m_tmean, m_spread, _ = stat(muon_times)
+print(f'per-step [{n_used} used, warmup {WARMUP} dropped]')
+print(f'  AdamW: median {a_med*1000:6.1f} ms | mean {a_mean*1000:6.1f} | trimmed {a_tmean*1000:6.1f} | p90-p10 {a_spread*1000:5.1f}')
+print(f'  Muon : median {m_med*1000:6.1f} ms | mean {m_mean*1000:6.1f} | trimmed {m_tmean*1000:6.1f} | p90-p10 {m_spread*1000:5.1f}')
+print(f'  Muon/AdamW per-step overhead (median): {m_med/a_med:.2f}x | (mean): {m_mean/a_mean:.2f}x')
+
+print('\nloss curves (matched steps):')
+for i in range(0, STEPS, LOG):
+    print(f'  step {i+1:4d}: AdamW {adamw_losses[i]:.4f} | Muon {muon_losses[i]:.4f}')
+
+# matched wall-clock (median-based): how many Muon steps fit into STEPS AdamW steps?
+budget_steps = min(STEPS, int(STEPS * a_med / m_med))
+print(f'\nAt matched wall-clock ({STEPS} AdamW steps @ median), Muon gets ~{budget_steps} steps')
+print(f'  AdamW loss @ step {STEPS}: {adamw_losses[-1]:.4f}')
+print(f'  Muon   loss @ step {budget_steps}: {muon_losses[budget_steps-1]:.4f}')
+
+ok_adamw = math.isfinite(adamw_losses[-1])
+ok_muon = math.isfinite(muon_losses[-1])
+# also require the timing spread to be reported loudly, not silently averaged away
+spread_note = ' (WARN: median/mean differ >15% - scheduler noise, quote MEDIAN)' \
+    if abs(m_mean - m_med) / max(m_med, 1e-9) > 0.15 else ''
+print(f'Timing spread check: mean/median Muon delta {abs(m_mean-m_med)/max(m_med,1e-9)*100:.1f}%{spread_note}')
+print('\nVERDICT (sanity):', 'PASS' if (ok_adamw and ok_muon) else 'FAIL')
+print('Paste the loss curves + per-step median/mean into the Muon validation note.')
