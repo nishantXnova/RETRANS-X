@@ -763,3 +763,245 @@ spread_note = ' (WARN: median/mean differ >15% - scheduler noise, quote MEDIAN)'
 print(f'Timing spread check: mean/median Muon delta {abs(m_mean-m_med)/max(m_med,1e-9)*100:.1f}%{spread_note}')
 print('\nVERDICT (sanity):', 'PASS' if (ok_adamw and ok_muon) else 'FAIL')
 print('Paste the loss curves + per-step median/mean into the Muon validation note.')
+
+
+# ===================== CELL 13 =====================
+# A/B: does a sparse-retrieval layer close the GPT gap?
+# StreamR (3 SSM + 1 retrieval) vs Stream (4 SSM) vs GPT (3L, RoPE) — same bytes,
+# same batches, same steps, matched scale. Legs: T=4096 (quality) and T=16384
+# (long context: val loss + step time). All three models see IDENTICAL data.
+# Caveat: the GPT T=16384 leg is O(n^2) attention and will be the slow part —
+# that is exactly the point (Stream/StreamR are O(n)).
+import os, sys, time, math, importlib
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+# --- load Stream from VECTOR/model.py (fresh) ---
+_vd = None
+for _p in [os.getcwd(), '/content/RETRANS-X', '/content']:
+    _v = os.path.join(_p, 'VECTOR')
+    if os.path.isfile(os.path.join(_v, 'model.py')): _vd = _v; break
+if _vd is None:
+    raise RuntimeError('VECTOR/model.py not found - run CELL 1 (clone) first')
+sys.path.insert(0, _vd)
+md = importlib.util.module_from_spec(
+    (s := importlib.util.spec_from_file_location('md', os.path.join(_vd, 'model.py')))
+); s.loader.exec_module(md)
+
+device = 'cuda'
+
+# --- data: reuse VECTOR/data/bytes if present, else download+prepare TinyStories ---
+DATA_DIR = os.path.join(_vd, 'data', 'bytes')
+TRAIN_BIN = os.path.join(DATA_DIR, 'train.bin')
+VAL_BIN = os.path.join(DATA_DIR, 'val.bin')
+if not (os.path.isfile(TRAIN_BIN) and os.path.isfile(VAL_BIN)):
+    print('byte dataset missing - downloading TinyStories + preparing (one-time)...')
+    import requests
+    os.makedirs(DATA_DIR, exist_ok=True)
+    src = os.path.join(DATA_DIR, 'TinyStories-train.txt')
+    if not os.path.isfile(src):
+        url = 'https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/TinyStories-train.txt'
+        print('Downloading ~940MB TinyStories-train.txt...')
+        r = requests.get(url, stream=True)
+        with open(src, 'wb') as f:
+            for chunk in r.iter_content(chunk_size=1 << 16):
+                f.write(chunk)
+    with open(src, 'rb') as f:
+        raw = f.read()
+    split = int(len(raw) * 0.99)
+    np.frombuffer(raw[:split], dtype=np.uint8).copy().tofile(TRAIN_BIN)
+    np.frombuffer(raw[split:], dtype=np.uint8).copy().tofile(VAL_BIN)
+    print(f'train {split:,}B / val {len(raw)-split:,}B')
+train_data = np.memmap(TRAIN_BIN, dtype=np.uint8, mode='r')
+val_data = np.memmap(VAL_BIN, dtype=np.uint8, mode='r')
+
+# --- GPT baseline: byte-level transformer with RoPE (position-free, no wpe growth) ---
+def _rope(positions, dim, base=10000.0):
+    inv = 1.0 / (base ** (torch.arange(0, dim, 2, device=positions.device).float() / dim))
+    ang = positions.float().unsqueeze(-1) * inv.unsqueeze(0)   # (T, dim/2)
+    return torch.cos(ang), torch.sin(ang)
+
+def _rot(x):
+    a, b = x.chunk(2, dim=-1)
+    return torch.cat((-b, a), dim=-1)
+
+class GPTAttn(nn.Module):
+    def __init__(self, n_embd, n_head, bias):
+        super().__init__()
+        self.n_head = n_head
+        self.c_attn = nn.Linear(n_embd, 3 * n_embd, bias=bias)
+        self.c_proj = nn.Linear(n_embd, n_embd, bias=bias)
+    def forward(self, x, cos, sin):
+        B, T, C = x.shape
+        q, k, v = self.c_attn(x).split(C, dim=-1)
+        hd = C // self.n_head
+        q = q.view(B, T, self.n_head, hd).transpose(1, 2)
+        k = k.view(B, T, self.n_head, hd).transpose(1, 2)
+        v = v.view(B, T, self.n_head, hd).transpose(1, 2)
+        q = q * cos.unsqueeze(0).unsqueeze(0) + _rot(q) * sin.unsqueeze(0).unsqueeze(0)
+        k = k * cos.unsqueeze(0).unsqueeze(0) + _rot(k) * sin.unsqueeze(0).unsqueeze(0)
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        return self.c_proj(y.transpose(1, 2).contiguous().view(B, T, C))
+
+class GPTMLP(nn.Module):
+    def __init__(self, n_embd, bias):
+        super().__init__()
+        self.c_fc = nn.Linear(n_embd, 4 * n_embd, bias=bias)
+        self.c_proj = nn.Linear(4 * n_embd, n_embd, bias=bias)
+    def forward(self, x):
+        return self.c_proj(F.gelu(self.c_fc(x)))
+
+class GPTBlock(nn.Module):
+    def __init__(self, n_embd, n_head, bias):
+        super().__init__()
+        self.ln1 = nn.LayerNorm(n_embd, bias=bias)
+        self.attn = GPTAttn(n_embd, n_head, bias)
+        self.ln2 = nn.LayerNorm(n_embd, bias=bias)
+        self.mlp = GPTMLP(n_embd, bias)
+
+class GPTByte(nn.Module):
+    def __init__(self, n_embd=128, n_layer=3, n_head=4, n_predict=4, vocab_size=256, bias=False):
+        super().__init__()
+        self.n_predict = n_predict
+        self.wte = nn.Embedding(vocab_size, n_embd)
+        self.blocks = nn.ModuleList([GPTBlock(n_embd, n_head, bias) for _ in range(n_layer)])
+        self.ln_f = nn.LayerNorm(n_embd, bias=bias)
+        self.head = nn.Linear(n_embd, n_predict * vocab_size, bias=False)
+        self.apply(self._init)
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                nn.init.normal_(p, mean=0.0, std=0.02 / math.sqrt(2 * n_layer))
+    def _init(self, m):
+        if isinstance(m, nn.Linear):
+            nn.init.normal_(m.weight, mean=0.0, std=0.02)
+            if m.bias is not None: nn.init.zeros_(m.bias)
+        elif isinstance(m, nn.Embedding):
+            nn.init.normal_(m.weight, mean=0.0, std=0.02)
+    def forward(self, idx, targets=None):
+        B, T = idx.shape
+        x = self.wte(idx)
+        cos, sin = _rope(torch.arange(T, device=idx.device), x.shape[-1])
+        for blk in self.blocks:
+            x = x + blk.attn(blk.ln1(x), cos, sin)
+            x = x + blk.mlp(blk.ln2(x))
+        x = self.ln_f(x)
+        logits = self.head(x)
+        loss = None
+        if targets is not None:
+            np_, vs = self.n_predict, logits.shape[-1] // self.n_predict
+            lg = logits.view(B, T, np_, vs)
+            loss = sum(F.cross_entropy(lg[:, :T-k, k].reshape(-1, vs),
+                                       targets[:, k:].reshape(-1), ignore_index=-1)
+                       for k in range(np_)) / np_
+        return logits, loss
+
+# --- shared data + eval ---
+def make_batches(data, T, B, n, gen):
+    L = len(data)
+    out = []
+    for _ in range(n):
+        ix = torch.randint(L - T - 1, (B,), generator=gen)
+        x = torch.stack([torch.from_numpy(data[i:i+T].astype(np.int64)) for i in ix]).to(device)
+        y = torch.stack([torch.from_numpy(data[i+1:i+1+T].astype(np.int64)) for i in ix]).to(device)
+        out.append((x, y))
+    return out
+
+def eval_loss(model, batches):
+    model.eval()
+    tot, n = 0.0, 0
+    with torch.no_grad():
+        for x, y in batches:
+            _, loss = model(x, targets=y)
+            tot += loss.item(); n += 1
+    model.train()
+    return tot / n
+
+def med(ts, drop=5):
+    t = sorted(ts[drop:])
+    n = len(t)
+    return t[n // 2] if n % 2 else (t[n // 2 - 1] + t[n // 2]) / 2
+
+def train_model(model, train_batches, val_batches, steps, warmup, eval_at,
+                peak_lr=6e-4, min_lr=6e-5):
+    model.train()
+    decay = [p for p in model.parameters() if p.dim() >= 2]
+    nodecay = [p for p in model.parameters() if p.dim() < 2]
+    opt = torch.optim.AdamW(
+        [{'params': decay, 'weight_decay': 0.1},
+         {'params': nodecay, 'weight_decay': 0.0}],
+        lr=peak_lr, betas=(0.9, 0.95), fused=True)
+    times, evals = [], []
+    for it in range(steps):
+        if it < warmup:
+            lr = peak_lr * (it + 1) / warmup
+        else:
+            r = (it - warmup) / max(1, steps - warmup)
+            lr = min_lr + 0.5 * (peak_lr - min_lr) * (1 + math.cos(math.pi * r))
+        for pg in opt.param_groups: pg['lr'] = lr
+        x, y = train_batches[it]
+        torch.cuda.synchronize(); t0 = time.perf_counter()
+        _, loss = model(x, targets=y)
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        opt.step(); opt.zero_grad(set_to_none=True)
+        torch.cuda.synchronize(); times.append(time.perf_counter() - t0)
+        if it in eval_at:
+            evals.append((it + 1, eval_loss(model, val_batches)))
+    return evals, times
+
+def run_leg(T, steps, warmup, B, tag):
+    print(f'\n{"="*70}')
+    print(f'LEG {tag}: T={T}, B={B}, steps={steps}  (identical data for all models)')
+    print(f'{"="*70}')
+    tr = make_batches(train_data, T, B, steps, torch.Generator().manual_seed(2026))
+    va = make_batches(val_data, T, B, 60, torch.Generator().manual_seed(1))
+    eval_at = set([steps // 4, steps // 2, steps - 1])
+    models = {}
+    builders = {
+        'Stream-4L': lambda: md.Stream(md.StreamConfig(
+            n_embd=128, n_layer=4, n_retrieval=0, ssm_d_state=16, n_predict=4,
+            block_size=T, dropout=0.0, bias=False)).to(device),
+        'StreamR-4L': lambda: md.Stream(md.StreamConfig(
+            n_embd=128, n_layer=4, n_retrieval=1, ssm_d_state=16, n_predict=4,
+            block_size=T, dropout=0.0, bias=False, n_attn_head=4,
+            window_size=128, n_global=16)).to(device),
+        'GPT-3L': lambda: GPTByte(n_embd=128, n_layer=3, n_head=4, n_predict=4).to(device),
+    }
+    for name, fn in builders.items():
+        torch.manual_seed(0)
+        m = fn()
+        n = sum(p.numel() for p in m.parameters())
+        print(f'{name}: {n/1e6:.3f}M params')
+        evals, times = train_model(m, tr, va, steps, warmup, eval_at=eval_at)
+        models[name] = dict(evals=evals, times=times, params=n)
+        print(f'  -> per-step median {med(times)*1000:.1f}ms | '
+              f'final val {evals[-1][1]:.4f} @ step {evals[-1][0]}')
+    print()
+    for name, d in models.items():
+        print(f'  {name:11s} val: ' + ' | '.join(f'step {it} = {vl:.4f}' for it, vl in d['evals']))
+    for name, d in models.items():
+        print(f'  {name:11s} step median: {med(d["times"])*1000:.1f} ms')
+    return models
+
+# --- run both legs ---
+leg1 = run_leg(4096, 1200, 100, B=4, tag='A quality')
+leg2 = run_leg(16384, 400, 50, B=2, tag='B long-context')
+
+# --- summary + verdict ---
+def row(leg, name):
+    return leg[name]['evals'][-1][1], med(leg[name]['times'])
+
+print(f'\n{"="*70}')
+print('SUMMARY (final val loss / per-step median ms)')
+print(f'{"="*70}')
+for tag, leg in [('T=4096', leg1), ('T=16384', leg2)]:
+    sl, st = row(leg, 'Stream-4L')
+    rl, rt = row(leg, 'StreamR-4L')
+    gl, gt = row(leg, 'GPT-3L')
+    print(f'  {tag}:')
+    print(f'    val loss : Stream {sl:.4f} | StreamR {rl:.4f} | GPT {gl:.4f}')
+    print(f'    step ms  : Stream {st*1000:.1f} | StreamR {rt*1000:.1f} | GPT {gt*1000:.1f}')
+    print(f'    retrieval helps (StreamR < Stream): {rl < sl} | '
+          f'gap-to-GPT closed: {(sl-gl)-(rl-gl):.4f} | StreamR faster than GPT: {rt < gt}')

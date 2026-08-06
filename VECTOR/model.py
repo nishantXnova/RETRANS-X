@@ -6,6 +6,9 @@ Predicts next N bytes directly from raw bytes — no tokenizer, no PE, no gate, 
 Architecture:
 - Byte embedding (256 → D) — the only "vocabulary"
 - Stacked SSM blocks — recurrence = position by construction
+- Optional sparse-retrieval blocks (windowed attention + global tokens) for
+  content-based recall that a fixed d_state recurrence cannot do, while staying
+  O(n) memory (window, not full attention). Off by default (n_retrieval=0).
 - Multi-byte head: predict next N bytes per position
 - Single loss: next-byte CE summed over N future predictions
 """
@@ -167,6 +170,67 @@ class SSMBlock(nn.Module):
 
 
 # -----------------------------------------------------------------------------
+# Sparse Retrieval Block: causal sliding-window attention + global tokens
+# -----------------------------------------------------------------------------
+class RetrievalBlock(nn.Module):
+    """
+    Gives the SSM backbone content-based recall which a fixed d_state recurrence
+    cannot do, while keeping O(n) memory: each query attends to the last `window`
+    positions (sliding window) plus a small set of global key/value tokens.
+
+    - Window keys come from a left-padded unfold, so slice t covers positions
+      [t-window+1, t] — causal by construction, no triangular mask needed.
+    - Relative-position bias (translation-invariant) instead of absolute PE, so
+      the model stays position-free like the SSM recurrence it sits on.
+    - Global tokens are static learned memory in this v1 (sink-token style);
+      content-derived global keys/values are the natural v2 upgrade.
+
+    Output: post-norm residual like SSMBlock (ln(proj(y) + x), None).
+    """
+    def __init__(self, n_embd: int, n_head: int = 4, window: int = 128,
+                 n_global: int = 16, bias: bool = False):
+        super().__init__()
+        assert n_embd % n_head == 0
+        self.n_embd = n_embd
+        self.n_head = n_head
+        self.window = window
+        self.n_global = n_global
+        self.head_dim = n_embd // n_head
+
+        self.qkv = nn.Linear(n_embd, 3 * n_embd, bias=bias)
+        self.proj = nn.Linear(n_embd, n_embd, bias=bias)
+        self.g_k = nn.Parameter(torch.randn(n_global, n_head, self.head_dim) * 0.02)
+        self.g_v = nn.Parameter(torch.randn(n_global, n_head, self.head_dim) * 0.02)
+        self.rel_bias = nn.Parameter(torch.zeros(2 * window - 1))
+        self.ln = nn.LayerNorm(n_embd)
+
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        B, T, D = x.shape
+        nh, hd, w, ng = self.n_head, self.head_dim, self.window, self.n_global
+
+        q, k, v = self.qkv(x).chunk(3, dim=-1)            # (B, T, D)
+        q = q.view(B, T, nh, hd).transpose(1, 2)          # (B, nh, T, hd)
+
+        k_pad = F.pad(k, (0, 0, w - 1, 0))
+        v_pad = F.pad(v, (0, 0, w - 1, 0))
+        k_win = k_pad.unfold(1, w, 1).view(B, T, nh, hd, w).transpose(1, 2)  # (B, nh, T, hd, w)
+        v_win = v_pad.unfold(1, w, 1).view(B, T, nh, hd, w).transpose(1, 2)
+
+        lw = torch.einsum('bhtd,bhtdw->bhtw', q, k_win) * (hd ** -0.5)       # (B, nh, T, w)
+        dist = (w - 1) - torch.arange(w, device=x.device)
+        lw = lw + self.rel_bias[dist].view(1, 1, 1, w)
+
+        lg = torch.einsum('bhtd,ghd->bhtg', q, self.g_k) * (hd ** -0.5)      # (B, nh, T, ng)
+
+        att = torch.softmax(torch.cat([lg, lw], dim=-1), dim=-1)             # (B, nh, T, ng+w)
+        ow = torch.einsum('bhtw,bhtdw->bhtd', att[..., ng:], v_win)
+        og = torch.einsum('bhtg,ghd->bhtd', att[..., :ng], self.g_v)
+        y = (ow + og).transpose(1, 2).reshape(B, T, D)
+
+        return self.ln(self.proj(y) + x), None
+
+
+# -----------------------------------------------------------------------------
 # Stream Model
 # -----------------------------------------------------------------------------
 @dataclass
@@ -179,6 +243,12 @@ class StreamConfig:
     block_size: int = 1024
     dropout: float = 0.0
     bias: bool = False
+    # Sparse retrieval (off by default). Retrieval blocks replace the LAST
+    # n_retrieval SSM blocks so the head directly sees retrieved content.
+    n_retrieval: int = 0
+    n_attn_head: int = 4
+    window_size: int = 128
+    n_global: int = 16
 
 
 class Stream(nn.Module):
@@ -188,10 +258,15 @@ class Stream(nn.Module):
 
         self.byte_embed = nn.Embedding(config.vocab_size, config.n_embd)
 
-        self.blocks = nn.ModuleList([
-            SSMBlock(config.n_embd, ssm_d_state=config.ssm_d_state, bias=config.bias)
-            for _ in range(config.n_layer)
-        ])
+        n_ssm = max(0, config.n_layer - config.n_retrieval)
+        self.blocks = nn.ModuleList(
+            [SSMBlock(config.n_embd, ssm_d_state=config.ssm_d_state, bias=config.bias)
+             for _ in range(n_ssm)]
+            + [RetrievalBlock(config.n_embd, n_head=config.n_attn_head,
+                              window=config.window_size, n_global=config.n_global,
+                              bias=config.bias)
+               for _ in range(config.n_retrieval)]
+        )
         self.ln_f = nn.LayerNorm(config.n_embd)
 
         self.head = nn.Linear(
@@ -202,7 +277,11 @@ class Stream(nn.Module):
 
         self.apply(self._init_weights)
         for pn, p in self.named_parameters():
-            if pn.endswith('out_proj.weight') or pn.endswith('c_proj.weight'):
+            # out_proj / c_proj / retrieval proj get GPT-2-style residual scaling.
+            # '.proj.weight' matches only the retrieval block's proj (dt_proj and
+            # out_proj have an underscore before 'proj', so they don't match).
+            if (pn.endswith('out_proj.weight') or pn.endswith('c_proj.weight')
+                    or pn.endswith('.proj.weight')):
                 nn.init.normal_(p, mean=0.0, std=0.02 / math.sqrt(2 * config.n_layer))
 
         print(f"Stream parameters: {self.get_num_params() / 1e6:.2f}M")

@@ -524,6 +524,32 @@ m_t = STE(s_t &gt; 0.5)</div>
   <div class="note"><strong>Matched wall-clock (300 AdamW steps at median):</strong> Muon gets ~243 steps and reaches loss <strong>0.0001</strong> vs AdamW <strong>0.0040</strong> at 300 — Muon converges far faster on this scale despite the 1.2× per-step cost.</div>
 
   <div class="note" style="border-color:var(--orange);"><strong>Caveats (read before citing):</strong> (1) This is a <strong>toy/sanity scale</strong> — 4L/128D on a tiny/synthetic byte task; a loss of ~0.0001 means the task is nearly memorized, and says nothing about production-scale convergence. (2) Muon's per-step cost is ~1.2× AdamW's (median), not free. (3) NS is deliberately bf16 and approximate; the validation asserts it stays a near-unitary preconditioner, not that it is exactly orthogonal.</div>
+
+  <h3>5.11 Sparse-Retrieval Layers vs GPT (A/B — results pending)</h3>
+  <p><strong>Why this is the central experiment.</strong> Stream is already O(n) (the forced win at long context), but at matched small scale GPT beats Stream by ~0.49 nat. The hypothesis: a fixed <code>d_state=16</code> recurrence cannot do <em>content-based recall</em> — it compresses history, it cannot go back and find "the name from 1,000 bytes ago" like attention can. So we add retrieval <em>selectively</em>: most layers stay SSM (O(n)), and one sparse-retrieval block provides exact local + anchored global recall.</p>
+  <p><strong>Design (<code>RetrievalBlock</code>, in <code>VECTOR/model.py</code>):</strong> each query attends to the last <code>window=128</code> positions (causal sliding window via left-padded <code>unfold</code> — no O(n²) matrix) plus 16 learned <strong>global</strong> key/value tokens (sink-style static memory; content-derived global tokens are the v2 upgrade). Position information is a learned <em>relative-position bias</em>, so the model stays position-free like the SSM it sits on. Memory stays O(n). Off by default (<code>StreamConfig(n_retrieval=0)</code>); the block replaces the last SSM block when enabled. The retrieval <code>proj</code> is square, so it lands on Muon's 14-step square-NS path automatically.</p>
+  <p><strong>CELL 13 A/B</strong> trains three models on <strong>identical</strong> batches (precomputed once, shared), same LR schedule, same steps: <code>Stream-4L</code> (4 SSM), <code>StreamR-4L</code> (3 SSM + 1 retrieval), and <code>GPT-3L</code> (Transformer with RoPE — position-free, so it cannot hide behind an absolute-PE memory crutch). Two legs: <strong>T=4096</strong> (quality) and <strong>T=16384</strong> (long context — val loss + per-step median timing; GPT is O(n²) and is expected to slow down hard, which is the point).</p>
+  <div class="card">
+    <div class="card-title">A/B: final val loss (lower is better)</div>
+    <table>
+      <thead><tr><th>Leg</th><th>Stream-4L</th><th>StreamR-4L</th><th>GPT-3L</th><th>Retrieval helps?</th><th>Gap closed vs GPT</th></tr></thead>
+      <tbody>
+        <tr><td>T=4096</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+        <tr><td>T=16384</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="card">
+    <div class="card-title">A/B: per-step median (ms, synchronized)</div>
+    <table>
+      <thead><tr><th>Leg</th><th>Stream-4L</th><th>StreamR-4L</th><th>GPT-3L</th><th>StreamR faster than GPT?</th></tr></thead>
+      <tbody>
+        <tr><td>T=4096</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+        <tr><td>T=16384</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="note" style="border-color:var(--orange);"><strong>Honesty box:</strong> v1 global tokens are <em>static</em> memory, not content-derived — they cannot by themselves retrieve arbitrary long-range facts (that is the next iteration: chunk-derived global keys/values). A partial gap close is a win for the direction, not a claim of GPT parity. The GPT T=16384 leg is slow by construction; if it overruns, interrupt and report the timing that did complete.</div>
 </section>
 
 <!-- MoE-Stream Link -->
