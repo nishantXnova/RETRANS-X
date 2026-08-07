@@ -1219,10 +1219,11 @@ class GPTAttn(nn.Module):
         self.n_head = n_head
         self.c_attn = nn.Linear(n_embd, 3 * n_embd, bias=bias)
         self.c_proj = nn.Linear(n_embd, n_embd, bias=bias)
-    def forward(self, x, cos, sin):
+    def forward(self, x, pos):
         B, T, C = x.shape
         q, k, v = self.c_attn(x).split(C, dim=-1)
         hd = C // self.n_head
+        cos, sin = _rope(pos, hd)   # angles over the head dim (hd), not full n_embd
         q = q.view(B, T, self.n_head, hd).transpose(1, 2)
         k = k.view(B, T, self.n_head, hd).transpose(1, 2)
         v = v.view(B, T, self.n_head, hd).transpose(1, 2)
@@ -1268,9 +1269,9 @@ class GPTByte(nn.Module):
     def forward(self, idx, targets=None):
         B, T = idx.shape
         x = self.wte(idx)
-        cos, sin = _rope(torch.arange(T, device=idx.device), x.shape[-1])
+        pos = torch.arange(T, device=idx.device)
         for blk in self.blocks:
-            x = x + blk.attn(blk.ln1(x), cos, sin)
+            x = x + blk.attn(blk.ln1(x), pos)
             x = x + blk.mlp(blk.ln2(x))
         x = self.ln_f(x)
         logits = self.head(x)
