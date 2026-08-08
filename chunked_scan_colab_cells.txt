@@ -1385,7 +1385,7 @@ def train_model(name, model, train_batches, val_batches, steps, warmup, eval_at,
             evals.append((it + 1, eval_loss(model, val_batches)))
     return evals, times
 
-def run_leg(T, steps, warmup, B, tag):
+def run_leg(T, steps, warmup, B, tag, skip=()):
     print(f'\n{"="*70}', flush=True)
     print(f'LEG {tag}: T={T}, B={B}, steps={steps}  (identical data for all models)', flush=True)
     print(f'{"="*70}', flush=True)
@@ -1394,16 +1394,19 @@ def run_leg(T, steps, warmup, B, tag):
     eval_at = set([steps // 4, steps // 2, steps - 1])
     models = {}
     builders = {
-        'Stream-4L': lambda: md.Stream(md.StreamConfig(
-            n_embd=128, n_layer=4, n_retrieval=0, ssm_d_state=16, n_predict=4,
+        'Stream-10M': lambda: md.Stream(md.StreamConfig(
+            n_embd=256, n_layer=16, n_retrieval=0, ssm_d_state=16, n_predict=4,
             block_size=T, dropout=0.0, bias=False)).to(device),
-        'StreamR-4L': lambda: md.Stream(md.StreamConfig(
-            n_embd=128, n_layer=4, n_retrieval=1, ssm_d_state=16, n_predict=4,
+        'StreamR-10M': lambda: md.Stream(md.StreamConfig(
+            n_embd=256, n_layer=16, n_retrieval=2, ssm_d_state=16, n_predict=4,
             block_size=T, dropout=0.0, bias=False, n_attn_head=4,
             window_size=128, n_global=16)).to(device),
-        'GPT-3L': lambda: GPTByte(n_embd=128, n_layer=3, n_head=4, n_predict=4).to(device),
+        'GPT-8L': lambda: GPTByte(n_embd=256, n_layer=8, n_head=4, n_predict=4).to(device),
     }
     for name, fn in builders.items():
+        if name in skip:
+            print(f'{name}: skipped at this T (see note)', flush=True)
+            continue
         torch.manual_seed(0)
         m = fn()
         if USE_TRITON and _HAS_TS and isinstance(m, md.Stream):
@@ -1416,28 +1419,36 @@ def run_leg(T, steps, warmup, B, tag):
               f'final val {evals[-1][1]:.4f} @ step {evals[-1][0]}', flush=True)
     print()
     for name, d in models.items():
-        print(f'  {name:11s} val: ' + ' | '.join(f'step {it} = {vl:.4f}' for it, vl in d['evals']))
+        print(f'  {name:12s} val: ' + ' | '.join(f'step {it} = {vl:.4f}' for it, vl in d['evals']))
     for name, d in models.items():
-        print(f'  {name:11s} step median: {med(d["times"])*1000:.1f} ms')
+        print(f'  {name:12s} step median: {med(d["times"])*1000:.1f} ms')
     return models
 
 # --- run both legs ---
+# GPT is skipped at T=16384 on purpose: its O(n^2) attention does not fit a T4
+# at that length (scores alone ~2GB fp16), which is exactly the gap Stream
+# exists to close. Long-context leg = Stream vs StreamR.
 leg1 = run_leg(4096, 1200, 100, B=4, tag='A quality')
-leg2 = run_leg(16384, 400, 50, B=2, tag='B long-context')
+leg2 = run_leg(16384, 400, 50, B=2, tag='B long-context', skip=('GPT-8L',))
 
 # --- summary + verdict ---
 def row(leg, name):
-    return leg[name]['evals'][-1][1], med(leg[name]['times'])
+    d = leg.get(name)
+    return (d['evals'][-1][1], med(d['times'])) if d else (float('nan'), float('nan'))
 
 print(f'\n{"="*70}', flush=True)
 print('SUMMARY (final val loss / per-step median ms)', flush=True)
 print(f'{"="*70}', flush=True)
 for tag, leg in [('T=4096', leg1), ('T=16384', leg2)]:
-    sl, st = row(leg, 'Stream-4L')
-    rl, rt = row(leg, 'StreamR-4L')
-    gl, gt = row(leg, 'GPT-3L')
+    sl, st = row(leg, 'Stream-10M')
+    rl, rt = row(leg, 'StreamR-10M')
+    gl, gt = row(leg, 'GPT-8L')
     print(f'  {tag}:')
     print(f'    val loss : Stream {sl:.4f} | StreamR {rl:.4f} | GPT {gl:.4f}')
     print(f'    step ms  : Stream {st*1000:.1f} | StreamR {rt*1000:.1f} | GPT {gt*1000:.1f}')
-    print(f'    retrieval helps (StreamR < Stream): {rl < sl} | '
-          f'gap-to-GPT closed: {(sl-gl)-(rl-gl):.4f} | StreamR faster than GPT: {rt < gt}')
+    if tag == 'T=4096':
+        print(f'    retrieval helps (StreamR < Stream): {rl < sl} | '
+              f'gap-to-GPT closed: {(sl-gl)-(rl-gl):.4f} | StreamR faster than GPT: {rt < gt}')
+    else:
+        print(f'    retrieval helps (StreamR < Stream): {rl < sl} | '
+              f'    GPT did NOT fit T=16384 on T4 (O(n^2) attention) - the gap this model is built to close.')
