@@ -134,11 +134,11 @@ if HAS_TRITON:
             a = tl.load(a_ptrs, mask=n_mask, other=0.0)
 
             # h[t] (state before step t) = out[t-1] or 0
-            if t > 0:
-                hp_ptrs = o_base + (t - 1) * stride_o_t + n_offs
-                h_prev = tl.load(hp_ptrs, mask=n_mask, other=0.0)
-            else:
-                h_prev = tl.zeros([BLOCK_N], dtype=tl.float32)
+            # Masked load (not an if/else): keeps h_prev dtype = out dtype,
+            # which matters under fp16 autocast (mismatched fp32 zeros would fail
+            # Triton's type check in the then-branch).
+            h_prev = tl.load(o_base + (t - 1) * stride_o_t + n_offs,
+                             mask=(t > 0) & n_mask, other=0.0)
 
             dh_total = gy + dh
             # grad_b[t] = dL/dh_{t+1}
@@ -240,10 +240,11 @@ if HAS_TRITON:
             gy = tl.load(g_base + t * stride_g_t + n_offs, mask=n_mask, other=0.0)
             dt_t = tl.load(d_base + t * stride_d_t)
             a_t = tl.exp(dt_t * A_row)
-            if t > 0:
-                h_prev = tl.load(o_base + (t - 1) * stride_o_t + n_offs, mask=n_mask, other=0.0)
-            else:
-                h_prev = tl.zeros([BLOCK_N], dtype=tl.float32)
+            # Masked load (not an if/else): keeps h_prev dtype = out dtype under
+            # fp16 autocast (fp32 zeros in an else branch would fail Triton's
+            # then/else two-of-message dtype check).
+            h_prev = tl.load(o_base + (t - 1) * stride_o_t + n_offs,
+                             mask=(t > 0) & n_mask, other=0.0)
             dh_total = gy + dh
             # g_b[t] = dL/dh_{t+1}
             tl.store(gb_base + t * stride_gb_t + n_offs, dh_total, mask=n_mask)
