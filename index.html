@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Stream: Continuous Byte-Level State Space Language Models</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Source+Serif+4:ital,wght@0,400;0,600;1,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 :root {
@@ -23,23 +23,35 @@
   --purple: #a78bfa;
   --orange: #fb923c;
   --cyan: #22d3ee;
-  --font: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font: 'Source Serif 4', Georgia, Cambria, 'Times New Roman', serif;
+  --head: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
   --mono: 'JetBrains Mono', monospace;
 }
 body { font-family: var(--font); background: var(--bg); color: var(--text); line-height: 1.7; -webkit-font-smoothing: antialiased; }
+h1, h2, h3, h4 { font-family: var(--head); }
 .container { max-width: 1100px; margin: 0 auto; padding: 2rem 1.5rem; }
 
 /* Paper header */
-.paper-header { border-bottom: 1px solid var(--border); padding-bottom: 2.5rem; margin-bottom: 2rem; text-align: center; }
+.masthead { display: flex; align-items: baseline; justify-content: space-between; border-bottom: 1px solid var(--border); padding-bottom: 1.25rem; margin-bottom: 1.5rem; }
+.masthead .identity { font-family: var(--head); text-align: left; }
+.masthead .identity .lab { font-size: 1rem; font-weight: 700; letter-spacing: 0.18em; text-transform: uppercase; color: var(--accent); }
+.masthead .identity .note { font-size: 0.7rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--text2); margin-top: 0.15rem; }
+.masthead .headline { text-align: center; flex: 1; padding: 0 1.5rem; }
+.masthead .headline h1 { font-size: 2.1rem; font-weight: 600; letter-spacing: -0.02em; color: var(--accent); line-height: 1.25; margin-bottom: 0.4rem; }
+.masthead .headline .sub { font-size: 0.78rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text2); }
+.masthead .colophon { font-family: var(--head); text-align: right; font-size: 0.78rem; line-height: 1.5; }
+.masthead .colophon .line { color: var(--text2); }
+.masthead .colophon .line.strong { color: var(--accent); font-weight: 500; }
+.paper-header { margin-bottom: 2rem; text-align: center; }
 .paper-header .badge { display: inline-block; font-size: 0.65rem; padding: 0.2rem 0.6rem; border-radius: 3px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; margin-bottom: 1rem; background: rgba(96, 165, 250, 0.15); color: var(--blue); border: 1px solid rgba(96, 165, 250, 0.3); }
-.paper-header h1 { font-size: 2.2rem; font-weight: 600; letter-spacing: -0.03em; color: var(--accent); line-height: 1.3; margin-bottom: 0.75rem; }
 .paper-header .authors { font-size: 0.95rem; color: var(--text2); margin-bottom: 0.5rem; }
 .paper-header .affiliation { font-size: 0.8rem; color: var(--text2); margin-bottom: 1rem; }
 .paper-header .date { font-size: 0.75rem; color: var(--text2); }
 .paper-nav { display: flex; gap: 0.5rem; justify-content: center; flex-wrap: wrap; margin-top: 1.25rem; }
-.paper-nav a { color: var(--text2); text-decoration: none; font-size: 0.75rem; padding: 0.3rem 0.75rem; border: 1px solid var(--border); border-radius: 4px; transition: all 0.15s; }
+.paper-nav a { color: var(--text2); text-decoration: none; font-size: 0.75rem; padding: 0.3rem 0.75rem; border: 1px solid var(--border); border-radius: 4px; transition: all 0.15s; font-family: var(--head); }
 .paper-nav a:hover { color: var(--accent); border-color: var(--text2); }
 .paper-nav a.active { color: var(--accent); border-color: var(--accent); }
+@media (max-width: 768px) { .masthead { flex-direction: column; align-items: center; gap: 1rem; text-align: center; } .masthead .identity, .masthead .colophon { text-align: center; } .masthead .headline { padding: 0; } .masthead .headline h1 { font-size: 1.6rem; } }
 
 /* Section styling */
 .section { margin-bottom: 2.5rem; }
@@ -47,6 +59,17 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); line
 .section h3 { font-size: 1.05rem; font-weight: 600; color: var(--accent); margin: 1.25rem 0 0.6rem; }
 .section p { font-size: 0.92rem; color: var(--text); margin-bottom: 0.75rem; line-height: 1.75; }
 .section .note { font-size: 0.82rem; color: var(--text2); margin-bottom: 0.75rem; }
+
+/* What changed callouts */
+.what-changed { border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 8px; padding: 1.75rem 1.75rem 1.5rem; margin-bottom: 2.5rem; background: var(--surface); }
+.what-changed .kicker { font-family: var(--head); font-size: 0.68rem; font-weight: 600; letter-spacing: 0.16em; text-transform: uppercase; color: var(--text2); margin-bottom: 1.25rem; }
+.what-changed .callout { display: flex; gap: 1.25rem; padding: 1.25rem 0; border-top: 1px solid var(--border); }
+.what-changed .callout:first-of-type { border-top: none; padding-top: 0; }
+.what-changed .callout:last-of-type { padding-bottom: 0; }
+.what-changed .callout .num { font-family: var(--mono); font-size: 0.8rem; color: var(--text2); padding-top: 0.3rem; min-width: 2.4rem; }
+.what-changed .callout h3 { font-family: var(--head); font-size: 1rem; font-weight: 600; color: var(--accent); margin: 0 0 0.35rem; }
+.what-changed .callout p { font-size: 0.88rem; color: var(--text); margin: 0; line-height: 1.6; }
+@media (max-width: 768px) { .what-changed .callout { flex-direction: column; gap: 0.4rem; } }
 
 .figure-container { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; margin: 1.25rem 0; text-align: center; overflow: hidden; }
 .figure-container img { max-width: 100%; height: auto; border-radius: 4px; display: block; margin: 0 auto; }
@@ -119,18 +142,26 @@ footer { border-top: 1px solid var(--border); padding-top: 1.5rem; margin-top: 2
 <body>
 <div class="container">
 
-<div style="text-align: center; font-size: 0.85rem; color: var(--text2); margin-bottom: 1rem; padding: 0.5rem; border: 1px solid var(--border); border-radius: 6px;">
-  Developer: <a href="https://nishantpaudel.vercel.app" style="color: var(--accent); text-decoration: none;">nishantpaudel.vercel.app</a>, Nishant Paudel
+<div class="masthead">
+  <div class="identity">
+    <div class="lab">VECTOR</div>
+    <div class="note">Research</div>
+  </div>
+  <div class="headline">
+    <h1>Stream</h1>
+    <div class="sub">Continuous Byte-Level State Space Language Models</div>
+  </div>
+  <div class="colophon">
+    <div class="line strong">Nishant Paudel</div>
+    <div class="line">Independent Research</div>
+    <div class="line">2026</div>
+  </div>
 </div>
 
 <!-- Paper Header -->
 <header class="paper-header">
-  <div class="badge">Research Report &middot; July 2026</div>
-  <h1>Stream: Continuous Byte-Level<br>State Space Language Models</h1>
-  <div class="authors">VECTOR Research</div>
-  <div class="affiliation">Independent Research</div>
-  <div class="date">Last updated: July 24, 2026</div>
   <nav class="paper-nav">
+    <a href="#whatchanged">What Changed</a>
     <a href="#abstract">Abstract</a>
     <a href="#introduction">Introduction</a>
     <a href="#architecture">Architecture</a>
@@ -150,6 +181,7 @@ footer { border-top: 1px solid var(--border); padding-top: 1.5rem; margin-top: 2
   <div class="card" style="padding: 0.75rem;">
     <div class="card-title">Contents</div>
     <ol>
+      <li><a href="#whatchanged">What Changed</a></li>
       <li><a href="#abstract">Abstract</a></li>
       <li><a href="#introduction">Introduction</a></li>
       <li><a href="#architecture">Architecture</a></li>
@@ -165,6 +197,31 @@ footer { border-top: 1px solid var(--border); padding-top: 1.5rem; margin-top: 2
 </div>
 <div style="min-width: 0;">
 
+<!-- What Changed -->
+<section id="whatchanged" class="what-changed">
+  <div class="kicker">What changed</div>
+  <div class="callout">
+    <div class="num">01</div>
+    <div>
+      <h3>We found the bottleneck</h3>
+      <p>The original scan implementation was dominated by autograd and kernel-launch overhead.</p>
+    </div>
+  </div>
+  <div class="callout">
+    <div class="num">02</div>
+    <div>
+      <h3>We measured it honestly</h3>
+      <p>After synchronized GPU timing, the claimed speedup dropped from 73× to approximately 5× end-to-end.</p>
+    </div>
+  </div>
+  <div class="callout">
+    <div class="num">03</div>
+    <div>
+      <h3>We fixed the architecture</h3>
+      <p>A fused Triton scan plus shape-conditional dispatch gives Stream genuinely linear scaling.</p>
+    </div>
+  </div>
+</section>
 
 <!-- Abstract -->
 <section id="abstract" class="section">
@@ -529,7 +586,8 @@ m_t = STE(s_t &gt; 0.5)</div>
   <h3>5.11 Sparse-Retrieval Layers vs GPT (A/B — results pending)</h3>
   <p><strong>Why this is the central experiment.</strong> Stream is already O(n) (the forced win at long context), but at matched small scale GPT beats Stream by ~0.49 nat. The hypothesis: a fixed <code>d_state=16</code> recurrence cannot do <em>content-based recall</em> — it compresses history, it cannot go back and find "the name from 1,000 bytes ago" like attention can. So we add retrieval <em>selectively</em>: most layers stay SSM (O(n)), and one sparse-retrieval block provides exact local + anchored global recall.</p>
   <p><strong>Design (<code>RetrievalBlock</code>, in <code>VECTOR/model.py</code>):</strong> each query attends to the last <code>window=128</code> positions (causal sliding window via left-padded <code>unfold</code> — no O(n²) matrix) plus 16 learned <strong>global</strong> key/value tokens (sink-style static memory; content-derived global tokens are the v2 upgrade). Position information is a learned <em>relative-position bias</em>, so the model stays position-free like the SSM it sits on. Memory stays O(n). Off by default (<code>StreamConfig(n_retrieval=0)</code>); the block replaces the last SSM block when enabled. The retrieval <code>proj</code> is square, so it lands on Muon's 14-step square-NS path automatically.</p>
-  <p><strong>CELL 13 A/B</strong> trains three models on <strong>identical</strong> batches (precomputed once, shared), same LR schedule, same steps: <code>Stream-4L</code> (4 SSM), <code>StreamR-4L</code> (3 SSM + 1 retrieval), and <code>GPT-3L</code> (Transformer with RoPE — position-free, so it cannot hide behind an absolute-PE memory crutch). Two legs: <strong>T=4096</strong> (quality) and <strong>T=16384</strong> (long context — val loss + per-step median timing; GPT is O(n²) and is expected to slow down hard, which is the point).</p>
+  <p><strong>CELL 13 A/B</strong> trains three models on <strong>identical</strong> batches (precomputed once, shared), same LR schedule, same steps: <code>Stream-4L</code> (4 SSM), <code>StreamR-4L</code> (3 SSM + 1 retrieval), and <code>GPT-3L</code> (Transformer with RoPE — position-free, so it cannot hide behind an absolute-PE memory crutch). Two legs: <strong>T=4096</strong> (quality) and <strong>T=16384</strong> (long context — val loss + per-step median timing; GPT is O(n²) and is expected to slow down hard, which is the point). All three models run under the same settings for a fair comparison.</p>
+  <p><strong>Efficiency stack (CELL 13 v2):</strong> every Stream/StreamR model runs on the <strong>Triton auto-scan</strong> (shape-conditional fused/chunked, benchmarked 1.2–5× faster than JIT in §5.3/§5.4) via <code>enable_triton(model, auto=True)</code>, and <strong>all</strong> models train in <strong>fp16 autocast + GradScaler</strong> (native T4 tensor cores). Toggles: <code>USE_TRITON</code>, <code>USE_FP16</code> at the top of the cell — flip <code>USE_FP16=False</code> if any NaN appears.</p>
   <div class="card">
     <div class="card-title">A/B: final val loss (lower is better)</div>
     <table>
@@ -715,7 +773,7 @@ m_t = STE(s_t &gt; 0.5)</div>
 </div>
 
 <footer>
-  Stream / VECTOR Research Report &middot; July 2026 &middot; <a href="moe.html" style="color: var(--text2);">MoE-Stream Detail</a>
+  Nishant Paudel &middot; VECTOR Research &middot; Independent Research &middot; 2026 &middot; <a href="moe.html" style="color: var(--text2);">MoE-Stream Detail</a>
 </footer>
 
 </div>
