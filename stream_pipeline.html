@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Stream — Architecture &amp; Pipeline</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Source+Serif+4:wght@400;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   :root {
@@ -24,9 +26,11 @@
     --slate: #94a3b8;
     --mono: 'JetBrains Mono', 'Cascadia Code', Consolas, monospace;
     --sans: 'Inter', -apple-system, 'Segoe UI', system-ui, sans-serif;
+    --serif: 'Source Serif 4', Georgia, 'Times New Roman', serif;
   }
   html { scroll-behavior: smooth; }
-  body { font-family: var(--sans); background: var(--bg); color: var(--text); line-height: 1.6; -webkit-font-smoothing: antialiased; }
+  body { font-family: var(--serif); background: var(--bg); color: var(--text); line-height: 1.6; -webkit-font-smoothing: antialiased; }
+  h1, h2, h3, h4 { font-family: var(--sans); }
   .page { max-width: 1080px; margin: 0 auto; padding: 3rem 1.5rem 4rem; }
 
   /* header */
@@ -56,6 +60,18 @@
   .note b { color: var(--amber); font-weight: 600; }
 
   footer { border-top: 1px solid var(--border); padding-top: 1.4rem; margin-top: 2rem; color: var(--faint); font-size: .72rem; text-align: center; }
+
+  @media (max-width: 760px) {
+    .page { padding: 2rem 1rem 3rem; }
+    .head h1 { font-size: 1.5rem; }
+    .head p { font-size: .86rem; }
+    .stats { gap: .75rem; }
+    .stat { padding: .85rem .9rem; }
+    .stat .v { font-size: 1.1rem; }
+    figure { padding: .9rem .8rem .7rem; }
+    figure .svgwrap { -webkit-overflow-scrolling: touch; }
+    figure svg { min-width: 660px; }
+  }
 </style>
 </head>
 <body>
@@ -479,7 +495,7 @@
     <b>Honest context.</b> Stream's value proposition is <b>O(n)</b> — flat ~228K tok/s across all sequence lengths (forward-only benchmark), O(n) memory (6.77 GB at T=65,536 on a T4), and a projected crossover vs. quadratic attention at T&#8776;9k (1.73&#215; at T=16k, forward-only). The naive JIT scan measures Python-loop overhead, not asymptotics; the current GPU implementation is the fused Triton scan, plus a <b>chunked two-level scan</b> for low-B&middot;H, occupancy-starved shapes and a shape-conditional <b>auto-dispatch</b> rule (chunked iff B&middot;H&le;128, else fused; no T threshold) — all benchmarked on T4 (see §5.9 of the report). The kernel body is still a serial loop over T (grid B&middot;H), not a true O(log T) parallel tree scan. End-to-end training throughput is being re-measured after fixing a missing <code>torch.cuda.synchronize()</code>; earlier "12 ms/iter / 73&#215;" figures were CPU-scheduling artifacts. The transformer still wins on loss at matched small-scale parameter counts — this diagram is the architecture, not the final verdict.
   </div>
 
-  <footer>Stream / VECTOR / MoE-Stream &middot; architecture diagram &middot; July 2026</footer>
+  <footer>Stream / VECTOR / MoE-Stream &middot; architecture diagram &middot; 2026</footer>
 
 </div>
 

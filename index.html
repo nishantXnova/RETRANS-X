@@ -127,6 +127,7 @@ td { padding: 0.45rem 0.75rem; border-bottom: 1px solid var(--border); font-size
 
 .toc { position: sticky; top: 1rem; min-width: 0; }
 .grid-2 > *, .grid-3 > * { min-width: 0; }
+.toc-grid { grid-template-columns: 220px 1fr; gap: 2rem; }
 .toc ol { list-style: none; margin: 0; }
 .toc li { padding: 0.25rem 0; font-size: 0.8rem; }
 .toc a { color: var(--text2); text-decoration: none; }
@@ -136,6 +137,16 @@ footer { border-top: 1px solid var(--border); padding-top: 1.5rem; margin-top: 2
 
 @media (max-width: 768px) {
   .paper-header h1 { font-size: 1.5rem; }
+}
+
+@media (max-width: 768px) {
+  .container { padding: 1.5rem 1rem; }
+  .toc-grid { grid-template-columns: 1fr; gap: 1.25rem; }
+  .toc { position: static; }
+  table { display: block; width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; white-space: nowrap; }
+  .card .value { font-size: 1.2rem; }
+  .paper-nav a { font-size: 0.7rem; padding: 0.28rem 0.55rem; }
+  .math-block { font-size: 0.78rem; padding: 0.65rem 0.75rem; }
 }
 </style>
 </head>
@@ -176,7 +187,7 @@ footer { border-top: 1px solid var(--border); padding-top: 1.5rem; margin-top: 2
   </nav>
 </header>
 
-<div class="grid-2" style="grid-template-columns: 220px 1fr; gap: 2rem;">
+<div class="grid-2 toc-grid">
 <div class="toc" style="min-width: 0;">
   <div class="card" style="padding: 0.75rem;">
     <div class="card-title">Contents</div>

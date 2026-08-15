@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>MoE-Stream: Sparse Mixture of Experts with Gradient-Aware Expert Lifecycle</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Source+Serif+4:ital,wght@0,400;0,600;1,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 :root {
@@ -23,10 +23,12 @@
   --purple: #a78bfa;
   --orange: #fb923c;
   --cyan: #22d3ee;
-  --font: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font: 'Source Serif 4', Georgia, Cambria, 'Times New Roman', serif;
+  --head: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
   --mono: 'JetBrains Mono', monospace;
 }
 body { font-family: var(--font); background: var(--bg); color: var(--text); line-height: 1.7; -webkit-font-smoothing: antialiased; }
+h1, h2, h3, h4 { font-family: var(--head); }
 .container { max-width: 1100px; margin: 0 auto; padding: 2rem 1.5rem; }
 
 /* Header */
@@ -97,6 +99,13 @@ footer a:hover { color: var(--accent); }
 
 @media (max-width: 768px) {
   .moe-header h1 { font-size: 1.4rem; }
+  .container { padding: 1.5rem 1rem; }
+  table { display: block; width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; white-space: nowrap; }
+  .math-block { font-size: 0.78rem; padding: 0.65rem 0.75rem; }
+  .code-block { font-size: 0.75rem; padding: 0.65rem 0.75rem; }
+  .flow-diagram { overflow-x: auto; text-align: left; }
+  .section h2 { font-size: 1.2rem; }
+  .card .value { font-size: 1.2rem; }
 }
 </style>
 </head>
@@ -108,7 +117,7 @@ footer a:hover { color: var(--accent); }
   <div class="badge">MoE-Stream &middot; Extended Report &middot; July 2026</div>
   <h1>Sparse Mixture-of-Experts with<br>Gradient-Aware Expert Lifecycle</h1>
   <div class="subtitle">Augmenting Stream with dynamic MoE layers and gradient-based expert value scoring</div>
-  <a href="index.html" class="back-link">&larr; Back to Stream/VECTOR Main Report</a>
+  <a href="index.html" class="back-link">&larr; Back to Stream Main Report</a>
 </header>
 
 <!-- Overview -->
@@ -412,7 +421,7 @@ balance_loss = n_experts &middot; &Sigma;_i (f_i &middot; P_i)</div>
 </section>
 
 <footer>
-  MoE-Stream Technical Report &middot; July 2026 &middot; <a href="index.html">Back to Stream/VECTOR Main Report</a>
+  MoE-Stream &middot; VECTOR Research &middot; <a href="index.html">Back to Stream Main Report</a>
 </footer>
 
 </div>
