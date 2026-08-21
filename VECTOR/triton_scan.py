@@ -1000,8 +1000,13 @@ def enable_triton(model, enabled: bool = True, fused: bool = False,
         else:
             print("WARNING: fused scan verification FAILED - auto mode falling back to non-fused Triton")
             scan_wrapper = triton_wrapped_scan
+        patched = 0
         for block in model.blocks:
-            block._ssm_scan = scan_wrapper.__get__(block, type(block))
+            if hasattr(block, '_ssm_scan'):
+                block._ssm_scan = scan_wrapper.__get__(block, type(block))
+                patched += 1
+        if not patched:
+            raise ValueError('model has no SSM blocks to patch with Triton')
         print("Stream scan: AUTO (shape-conditional fused/chunked)")
         return
 
@@ -1037,8 +1042,13 @@ def enable_triton(model, enabled: bool = True, fused: bool = False,
     else:
         scan_wrapper = triton_wrapped_scan
 
+    patched = 0
     for block in model.blocks:
-        block._ssm_scan = scan_wrapper.__get__(block, type(block))
+        if hasattr(block, '_ssm_scan'):
+            block._ssm_scan = scan_wrapper.__get__(block, type(block))
+            patched += 1
+    if not patched:
+        raise ValueError('model has no SSM blocks to patch with Triton')
 
     if enabled:
         if use_chunked:

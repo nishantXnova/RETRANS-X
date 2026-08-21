@@ -17,6 +17,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 from dataclasses import dataclass
 from typing import Optional, Tuple, List, TYPE_CHECKING
 
@@ -144,7 +145,7 @@ class SSMBlock(nn.Module):
         self.out_proj = nn.Linear(hidden, n_embd, bias=bias)
         self.ln = nn.LayerNorm(n_embd)
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, 'SSMBlockState']:
         B, T, D = x.shape
         H = self.n_embd * (D // self.n_embd) if D != self.n_embd else self.n_embd * 2
 
@@ -160,35 +161,111 @@ class SSMBlock(nn.Module):
         B_param, C_param = self.x_proj(x_conv).chunk(2, dim=-1)
         A = -torch.exp(self.A_log.float())
 
-        y, state = self._ssm_scan(x_conv, dt, A, B_param, C_param)
+        y, ssm_state = self._ssm_scan(x_conv, dt, A, B_param, C_param)
+        # The historical scan wrappers returned `(state, aux)`; accept that
+        # ABI while the stateful inference contract stores the tensor itself.
+        if isinstance(ssm_state, tuple):
+            ssm_state = ssm_state[0]
         y = y * gate
         out = self.out_proj(y)
-        return self.ln(out + x), state
+        history_len = self.ssm_d_conv - 1
+        conv_history = (x_main[:, -history_len:].detach() if history_len else
+                        x_main[:, :0].detach())
+        return self.ln(out + x), SSMBlockState(ssm=ssm_state, conv=conv_history)
 
     def _ssm_scan(self, u, dt, A, B, C):
         return parallel_ssm_scan(u, dt, A, B, C, self.D)
 
+    @torch.no_grad()
+    def step(self, x: torch.Tensor, state: Optional['SSMBlockState'] = None
+             ) -> Tuple[torch.Tensor, 'SSMBlockState']:
+        """Process exactly one byte position while carrying only recurrent state.
+
+        This is intentionally separate from the training scan: it is the
+        correctness reference for the eventual fused decode kernel.  `x` has
+        shape `(batch, n_embd)` and the returned state is detached, making its
+        memory independent of generated length.
+        """
+        if x.ndim != 2:
+            raise ValueError(f"SSMBlock.step expects (B, D), got {tuple(x.shape)}")
+        B, D = x.shape
+        x_proj = self.in_proj(x)
+        x_main, gate = x_proj.chunk(2, dim=-1)
+        x_main = self.act(x_main)
+        gate = torch.sigmoid(gate)
+
+        history_len = self.ssm_d_conv - 1
+        if state is None:
+            conv_history = x_main.new_zeros(B, history_len, x_main.shape[-1])
+            ssm_state = x_main.new_zeros(B, x_main.shape[-1], self.ssm_d_state)
+        else:
+            conv_history, ssm_state = state.conv, state.ssm
+            expected_history = (B, history_len, x_main.shape[-1])
+            expected_ssm = (B, x_main.shape[-1], self.ssm_d_state)
+            if tuple(conv_history.shape) != expected_history or tuple(ssm_state.shape) != expected_ssm:
+                raise ValueError("SSM state shape does not match this block or batch")
+
+        conv_input = torch.cat((conv_history, x_main.unsqueeze(1)), dim=1)
+        x_conv = F.conv1d(conv_input.transpose(1, 2), self.conv1d.weight,
+                          self.conv1d.bias, groups=self.conv1d.groups).squeeze(-1)
+        x_conv = self.act(x_conv)
+        dt = F.softplus(self.dt_proj(x_conv))
+        B_param, C_param = self.x_proj(x_conv).chunk(2, dim=-1)
+        A = -torch.exp(self.A_log.float()).to(dtype=x.dtype)
+        a = torch.exp(dt.unsqueeze(-1) * A.unsqueeze(0))
+        b = dt.unsqueeze(-1) * B_param.unsqueeze(1) * x_conv.unsqueeze(-1)
+        next_ssm = ssm_state * a + b
+        y = (next_ssm * C_param.unsqueeze(1)).sum(-1) + self.D.to(x.dtype) * x_conv
+        out = self.ln(self.out_proj(y * gate) + x)
+        next_history = (conv_input[:, -history_len:].detach() if history_len else
+                        conv_input[:, :0].detach())
+        return out, SSMBlockState(ssm=next_ssm.detach(), conv=next_history)
+
+
+@dataclass
+class SSMBlockState:
+    """Persistent state of one selective-SSM layer during inference."""
+    ssm: torch.Tensor
+    conv: torch.Tensor
+
 
 # -----------------------------------------------------------------------------
-# Sparse Retrieval Block: causal sliding-window attention + global tokens
+# Sparse Retrieval Block v2: multi-pathway content recall, O(n) memory.
 # -----------------------------------------------------------------------------
 class RetrievalBlock(nn.Module):
     """
     Gives the SSM backbone content-based recall which a fixed d_state recurrence
-    cannot do, while keeping O(n) memory: each query attends to the last `window`
-    positions (sliding window) plus a small set of global key/value tokens.
+    cannot do, while keeping O(n) memory and position-free relative biases.
 
-    - Window keys come from a left-padded unfold, so slice t covers positions
-      [t-window+1, t] — causal by construction, no triangular mask needed.
-    - Relative-position bias (translation-invariant) instead of absolute PE, so
-      the model stays position-free like the SSM recurrence it sits on.
-    - Global tokens are static learned memory in this v1 (sink-token style);
-      content-derived global keys/values are the natural v2 upgrade.
+    Pathways (all causal, all translation-invariant, no absolute PE):
+      1. Dense window  — exact recall over the last `window` positions (v1).
+      2. Strided window — exact recall at a stride beyond the dense window
+         (offsets w+1, w+1+s, w+1+2s, ...), reaching ~w + slots·s bytes back.
+      3. Segment memory — content-derived: the sequence is split into
+         `mem_seg`-byte segments and each segment's k/v are attention-pooled by a
+         learned per-head query into one (k, v) pair; every position attends to
+         the `mem_slots` most recent segments before its own. Unlike v1's static
+         sink tokens, these keys/values ARE the pooled content, so distant bytes
+         are actually retrievable.
+      4. Global tokens  — a small set of static learned sinks (anchors).
+
+    Fusion: each head learns per-pathway weights (softmax over active pathways),
+    so different heads can specialize on local vs. far recall — the gating idea
+    from the design doc, at zero per-position cost.
+
+    When all v2 features are OFF (per_head_bias=False, stride=0, mem_slots=0,
+    gated=False) this block reproduces v1 EXACTLY (shared rel_bias, joint
+    softmax over [global, window]), so the pilot and CELL 13 numbers remain
+    reproducible. Enabling any feature switches to the pathway-fusion path.
 
     Output: post-norm residual like SSMBlock (ln(proj(y) + x), None).
     """
     def __init__(self, n_embd: int, n_head: int = 4, window: int = 128,
-                 n_global: int = 16, bias: bool = False):
+                 n_global: int = 16, bias: bool = False,
+                 per_head_bias: bool = False,
+                 stride: int = 0, stride_slots: int = 16,
+                 mem_slots: int = 0, mem_seg: int = 32,
+                 gated: bool = False):
         super().__init__()
         assert n_embd % n_head == 0
         self.n_embd = n_embd
@@ -196,13 +273,53 @@ class RetrievalBlock(nn.Module):
         self.window = window
         self.n_global = n_global
         self.head_dim = n_embd // n_head
+        self.per_head_bias = per_head_bias
+        self.stride = stride
+        self.stride_slots = stride_slots
+        self.mem_slots = mem_slots
+        self.mem_seg = mem_seg
+        self.gated = gated
 
         self.qkv = nn.Linear(n_embd, 3 * n_embd, bias=bias)
         self.proj = nn.Linear(n_embd, n_embd, bias=bias)
-        self.g_k = nn.Parameter(torch.randn(n_global, n_head, self.head_dim) * 0.02)
-        self.g_v = nn.Parameter(torch.randn(n_global, n_head, self.head_dim) * 0.02)
-        self.rel_bias = nn.Parameter(torch.zeros(2 * window - 1))
+        if n_global > 0:
+            self.g_k = nn.Parameter(torch.randn(n_global, n_head, self.head_dim) * 0.02)
+            self.g_v = nn.Parameter(torch.randn(n_global, n_head, self.head_dim) * 0.02)
+        else:
+            self.register_buffer('g_k', torch.zeros(0, n_head, self.head_dim))
+            self.register_buffer('g_v', torch.zeros(0, n_head, self.head_dim))
+
+        if per_head_bias:
+            self.rel_bias = nn.Parameter(torch.zeros(n_head, 2 * window - 1))
+        else:
+            self.rel_bias = nn.Parameter(torch.zeros(2 * window - 1))
+
+        if stride > 0:
+            if per_head_bias:
+                self.stride_bias = nn.Parameter(torch.zeros(n_head, stride_slots))
+            else:
+                self.stride_bias = nn.Parameter(torch.zeros(stride_slots))
+        if mem_slots > 0:
+            self.seg_q = nn.Parameter(torch.randn(n_head, self.head_dim) * 0.02)
+            if per_head_bias:
+                self.mem_bias = nn.Parameter(torch.zeros(n_head, mem_slots))
+            else:
+                self.mem_bias = nn.Parameter(torch.zeros(mem_slots))
+
+        if gated:
+            n_paths = (1 + (1 if stride > 0 else 0)
+                       + (1 if mem_slots > 0 else 0)
+                       + (1 if n_global > 0 else 0))
+            self.path_logits = nn.Parameter(torch.zeros(n_paths, n_head))
         self.ln = nn.LayerNorm(n_embd)
+
+    @staticmethod
+    def _masked_softmax(logits: torch.Tensor, mask: torch.Tensor, dim: int) -> torch.Tensor:
+        """Softmax over `dim` with binary mask; invalid slots get ~0 weight (never NaN)."""
+        l = torch.where(mask, logits, torch.full_like(logits, -1e9))
+        a = torch.softmax(l, dim=dim)
+        a = a * mask
+        return a / (a.sum(dim=dim, keepdim=True) + 1e-12)
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         B, T, D = x.shape
@@ -211,28 +328,238 @@ class RetrievalBlock(nn.Module):
         q, k, v = self.qkv(x).chunk(3, dim=-1)            # (B, T, D)
         q = q.view(B, T, nh, hd).transpose(1, 2)          # (B, nh, T, hd)
 
+        is_v2 = (self.per_head_bias or self.stride > 0
+                 or self.mem_slots > 0 or self.gated)
+        if not is_v2:
+            # ---- exact v1 path (byte-identical to the original block) ----
+            k_pad = F.pad(k, (0, 0, w - 1, 0))
+            v_pad = F.pad(v, (0, 0, w - 1, 0))
+            k_win = k_pad.unfold(1, w, 1).view(B, T, nh, hd, w).transpose(1, 2)
+            v_win = v_pad.unfold(1, w, 1).view(B, T, nh, hd, w).transpose(1, 2)
+            lw = torch.einsum('bhtd,bhtdw->bhtw', q, k_win) * (hd ** -0.5)
+            dist = (w - 1) - torch.arange(w, device=x.device)
+            lw = lw + self.rel_bias[dist].view(1, 1, 1, w)
+            lg = torch.einsum('bhtd,ghd->bhtg', q, self.g_k) * (hd ** -0.5)
+            att = torch.softmax(torch.cat([lg, lw], dim=-1), dim=-1)
+            ow = torch.einsum('bhtw,bhtdw->bhtd', att[..., ng:], v_win)
+            og = torch.einsum('bhtg,ghd->bhtd', att[..., :ng], self.g_v)
+            y = (ow + og).transpose(1, 2).reshape(B, T, D)
+            return self.ln(self.proj(y) + x), None
+
+        k_h = k.view(B, T, nh, hd)
+        v_h = v.view(B, T, nh, hd)
+        outs = []
+
+        # ---- pathway 1: dense window (v1 mechanism, optional per-head bias) ----
         k_pad = F.pad(k, (0, 0, w - 1, 0))
         v_pad = F.pad(v, (0, 0, w - 1, 0))
-        k_win = k_pad.unfold(1, w, 1).view(B, T, nh, hd, w).transpose(1, 2)  # (B, nh, T, hd, w)
+        k_win = k_pad.unfold(1, w, 1).view(B, T, nh, hd, w).transpose(1, 2)
         v_win = v_pad.unfold(1, w, 1).view(B, T, nh, hd, w).transpose(1, 2)
-
-        lw = torch.einsum('bhtd,bhtdw->bhtw', q, k_win) * (hd ** -0.5)       # (B, nh, T, w)
+        lw = torch.einsum('bhtd,bhtdw->bhtw', q, k_win) * (hd ** -0.5)
         dist = (w - 1) - torch.arange(w, device=x.device)
-        lw = lw + self.rel_bias[dist].view(1, 1, 1, w)
+        if self.per_head_bias:
+            lw = lw + self.rel_bias[:, dist].unsqueeze(0).unsqueeze(2)
+        else:
+            lw = lw + self.rel_bias[dist].view(1, 1, 1, w)
+        att_w = torch.softmax(lw, dim=-1)
+        ow = torch.einsum('bhtw,bhtdw->bhtd', att_w, v_win)
+        outs.append(ow)
 
-        lg = torch.einsum('bhtd,ghd->bhtg', q, self.g_k) * (hd ** -0.5)      # (B, nh, T, ng)
+        # ---- pathway 2: strided far window (exact recall at distance) ----
+        if self.stride > 0:
+            Ks = self.stride_slots
+            offsets = w + 1 + torch.arange(Ks, device=x.device) * self.stride   # (Ks,)
+            pos_idx = torch.arange(T, device=x.device).unsqueeze(1) - offsets.unsqueeze(0)  # (T, Ks)
+            valid_s = pos_idx >= 0
+            idx_s = pos_idx.clamp(min=0)   # (T, Ks)
+            k_str = k_h[:, idx_s, :, :]    # (B, T, Ks, nh, hd) advanced index on dim 1
+            v_str = v_h[:, idx_s, :, :]
+            k_str = k_str.permute(0, 3, 1, 2, 4).contiguous()   # (B, nh, T, Ks, hd)
+            v_str = v_str.permute(0, 3, 1, 2, 4).contiguous()
+            ls = torch.einsum('bhtd,bhtsd->bhts', q, k_str) * (hd ** -0.5)
+            if self.per_head_bias:
+                ls = ls + self.stride_bias.unsqueeze(0).unsqueeze(2)
+            else:
+                ls = ls + self.stride_bias.view(1, 1, 1, Ks)
+            att_s = self._masked_softmax(ls, valid_s.unsqueeze(0).unsqueeze(0), dim=-1)   # (B, nh, T, Ks)
+            os_ = torch.einsum('bhts,bhtsd->bhtd', att_s, v_str)
+            outs.append(os_)
 
-        att = torch.softmax(torch.cat([lg, lw], dim=-1), dim=-1)             # (B, nh, T, ng+w)
-        ow = torch.einsum('bhtw,bhtdw->bhtd', att[..., ng:], v_win)
-        og = torch.einsum('bhtg,ghd->bhtd', att[..., :ng], self.g_v)
-        y = (ow + og).transpose(1, 2).reshape(B, T, D)
+        # ---- pathway 3: content-derived segment memory ----
+        if self.mem_slots > 0:
+            ms, Km = self.mem_seg, self.mem_slots
+            n_seg = (T + ms - 1) // ms
+            padT = n_seg * ms - T
+            # pad T on the left (positions before 0) with zeros; pooling rows for
+            # padded tail tokens are masked out so no dummy content leaks in.
+            k_seg = F.pad(k_h, (0, 0, 0, 0, padT, 0))      # (B, n_seg*ms, nh, hd)
+            v_seg = F.pad(v_h, (0, 0, 0, 0, padT, 0))
+            k_seg = k_seg.view(B, n_seg, ms, nh, hd)
+            v_seg = v_seg.view(B, n_seg, ms, nh, hd)
+            # learned per-head pooling query → content-derived summary per segment
+            sp = torch.einsum('bsmhd,hd->bsmh', k_seg, self.seg_q) * (hd ** -0.5)
+            pos_tok = torch.arange(n_seg * ms, device=x.device).view(1, n_seg, ms)
+            seg_valid = pos_tok < T          # (1, n_seg, ms)
+            att_pool = self._masked_softmax(sp, seg_valid.unsqueeze(-1).expand(B, n_seg, ms, nh), dim=2)
+            mem_k = torch.einsum('bsmh,bsmhd->bshd', att_pool, k_seg)   # (B, n_seg, nh, hd)
+            mem_v = torch.einsum('bsmh,bsmhd->bshd', att_pool, v_seg)
+            # each position attends to the last Km segments strictly before its own
+            seg_idx = (torch.arange(T, device=x.device) // ms)           # (T,)
+            m_start = (seg_idx - Km).clamp(min=0)                        # (T,)
+            m_idx = m_start.unsqueeze(1) + torch.arange(Km, device=x.device).unsqueeze(0)  # (T, Km)
+            valid_m = m_idx < seg_idx.unsqueeze(1)                       # segment must precede own
+            m_idx_c = m_idx.clamp(min=0, max=n_seg - 1)                  # (T, Km)
+            gk = mem_k[:, m_idx_c].permute(0, 3, 1, 2, 4).contiguous()      # (B, nh, T, Km, hd)
+            gv = mem_v[:, m_idx_c].permute(0, 3, 1, 2, 4).contiguous()
+            lm = torch.einsum('bhtd,bhtkd->bhtk', q, gk) * (hd ** -0.5)
+            rel_dist = seg_idx.unsqueeze(1) - m_idx                      # 1..Km (larger = older)
+            if self.per_head_bias:
+                lm = lm + self.mem_bias[:, (rel_dist - 1).clamp(min=0)].unsqueeze(0)
+            else:
+                lm = lm + self.mem_bias[(rel_dist - 1).clamp(min=0)].view(1, 1, T, Km)
+            att_m = self._masked_softmax(lm, valid_m.unsqueeze(0).unsqueeze(0), dim=-1)
+            om = torch.einsum('bhtk,bhtkd->bhtd', att_m, gv)
+            outs.append(om)
 
+        # ---- pathway 4: static global tokens ----
+        if ng > 0:
+            lg = torch.einsum('bhtd,ghd->bhtg', q, self.g_k) * (hd ** -0.5)
+            att_g = torch.softmax(lg, dim=-1)
+            og = torch.einsum('bhtg,ghd->bhtd', att_g, self.g_v)
+            outs.append(og)
+
+        # ---- fusion: learned per-head pathway weights (gating) ----
+        if self.gated:
+            wts = torch.softmax(self.path_logits, dim=0)   # (n_paths, nh)
+            y = sum(wts[p].view(1, nh, 1, 1) * o for p, o in enumerate(outs))
+        else:
+            y = sum(outs) if len(outs) > 1 else outs[0]
+        y = y.transpose(1, 2).reshape(B, T, D)
         return self.ln(self.proj(y) + x), None
 
 
 # -----------------------------------------------------------------------------
-# Stream Model
+# Gated Delta Memory Block: pure-recurrence content-addressed retrieval.
 # -----------------------------------------------------------------------------
+class DeltaMemoryBlock(nn.Module):
+    """
+    Content-addressed memory via a per-head associative matrix updated with the
+    delta rule — the pure-recurrence alternative to RetrievalBlock's bounded
+    attention. No tokens, no positions, no PE, no O(T^2): the state is exactly
+    nh small matrices W_h in R^(hd x hd), and every token does O(hd^2) work.
+
+      read : o_t   = W_{t-1} @ q_t                       (content-addressed)
+      write: pred  = W_{t-1} @ k_t                       (predict stored value)
+             W_t   = lam_t * W_{t-1} + beta_t * (v_t - pred) otimes k_t
+
+    lam_t (decay) and beta_t (write gain) are learned per head and input-driven:
+    a head can act as a persistent associative store (high lam, low beta) or a
+    volatile short-term buffer (low lam, high beta). k is RMSNorm-normalized per
+    head (unit-length keys bound interference and keep the matrix stable in
+    fp16). Reads use the state BEFORE the current token's write, so recall is
+    strictly of the past — causal by construction, like the SSM.
+
+    With delta_window > 0 the block adds an exact-recent dense window pathway
+    (causal unfold, like RetrievalBlock) and fuses it with the matrix via a
+    learned per-head softmax gate; delta_window=0 is pure recurrence.
+
+    Output: post-norm residual like the other blocks (ln(proj(y) + x), None).
+    """
+    def __init__(self, n_embd: int, n_head: int = 4, window: int = 0,
+                 bias: bool = False, per_head_bias: bool = True,
+                 lam_init: float = 2.2, beta_init: float = 0.0):
+        super().__init__()
+        assert n_embd % n_head == 0
+        self.n_embd = n_embd
+        self.n_head = n_head
+        self.window = window
+        self.head_dim = n_embd // n_head
+        self.per_head_bias = per_head_bias
+
+        self.qkv = nn.Linear(n_embd, 3 * n_embd, bias=bias)
+        # per-head gate logits: [lambda_raw, beta_raw] -> (B, T, 2*nh)
+        self.gate_logits = nn.Linear(n_embd, 2 * n_head, bias=True)
+        with torch.no_grad():
+            self.gate_logits.weight.zero_()
+            self.gate_logits.bias[0:n_head] = lam_init
+            self.gate_logits.bias[n_head:2 * n_head] = beta_init
+        self.k_norm = nn.LayerNorm(self.head_dim, bias=False)   # per-head RMS-ish
+        self.proj = nn.Linear(n_embd, n_embd, bias=bias)
+        self.ln = nn.LayerNorm(n_embd)
+
+        if window > 0:
+            if per_head_bias:
+                self.rel_bias = nn.Parameter(torch.zeros(n_head, 2 * window - 1))
+            else:
+                self.rel_bias = nn.Parameter(torch.zeros(2 * window - 1))
+            self.path_logits = nn.Parameter(torch.zeros(2, n_head))
+
+    @torch.jit.ignore
+    def _delta_scan(self, S, q, k, v, lam, beta):
+        """Sequential delta recurrence over T, vectorized over (B, nh).
+        S:   (B, nh, hd, hd)  state (zeros at entry)
+        q/k/v: (B, T, nh, hd)
+        lam/beta: (B, T, nh)
+        returns o (B, T, nh, hd), final S (detached)
+        """
+        B, T, nh, hd = q.shape
+        outs = torch.empty_like(q)
+        lam = lam.unsqueeze(-1).unsqueeze(-1)   # (B, T, nh, 1, 1)
+        beta = beta.unsqueeze(-1).unsqueeze(-1)  # (B, T, nh, 1, 1)
+        for t in range(T):
+            kt = k[:, t]                 # (B, nh, hd)
+            qt = q[:, t]
+            vt = v[:, t]
+            # read-before-write: strictly past recall
+            Sk = torch.matmul(S, kt.unsqueeze(-1)).squeeze(-1)      # (B, nh, hd)
+            o = torch.matmul(S, qt.unsqueeze(-1)).squeeze(-1)       # (B, nh, hd)
+            outs[:, t] = o
+            # delta write: erase along kt, add v-prediction correction
+            err = vt - Sk                                          # (B, nh, hd)
+            S = lam[:, t] * S + beta[:, t] * kt.unsqueeze(-1) * err.unsqueeze(-2)
+        return outs, S.detach()
+
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        B, T, D = x.shape
+        nh, hd, w = self.n_head, self.head_dim, self.window
+
+        q, k, v = self.qkv(x).chunk(3, dim=-1)                 # (B, T, D)
+        k_raw = k
+        # normalize keys to unit-ish length per head (bounded interference, fp16-safe)
+        k = self.k_norm(k.view(B, T, nh, hd)).view(B, T, nh, hd)
+        qh = q.view(B, T, nh, hd)
+        vh = v.view(B, T, nh, hd)
+
+        g = torch.sigmoid(self.gate_logits(x))                 # (B, T, 2*nh)
+        lam, beta = g[..., :nh], g[..., nh:]                   # (B, T, nh)
+
+        S0 = q.new_zeros(B, nh, hd, hd)
+        o_d, _ = self._delta_scan(S0, qh, k, vh, lam, beta)    # (B, T, nh, hd)
+
+        if w > 0:
+            # hybrid pathway: exact-recent window, fused with the associative
+            # response by a learned per-head gate over [matrix, window].
+            k_pad = F.pad(k_raw, (0, 0, w - 1, 0))
+            v_pad = F.pad(v, (0, 0, w - 1, 0))
+            k_win = k_pad.unfold(1, w, 1).view(B, T, nh, hd, w).transpose(1, 2)  # (B, nh, T, hd, w)
+            v_win = v_pad.unfold(1, w, 1).view(B, T, nh, hd, w).transpose(1, 2)
+            q_pj = qh.transpose(1, 2)                          # (B, nh, T, hd)
+            lw = torch.matmul(q_pj.unsqueeze(-2), k_win).squeeze(-2)  # (B, nh, T, w)
+            lw = lw * (hd ** -0.5)
+            dist = (w - 1) - torch.arange(w, device=x.device)
+            lw = lw + self.rel_bias[:, dist].unsqueeze(0).unsqueeze(2)
+            att_w = torch.softmax(lw, dim=-1)                  # (B, nh, T, w)
+            o_w = torch.matmul(att_w.unsqueeze(-2), v_win.transpose(-1, -2)).squeeze(-2)  # (B, nh, T, hd)
+
+            o_d = o_d.transpose(1, 2)                          # (B, nh, T, hd)
+            wts = torch.softmax(self.path_logits, dim=0)       # (2, nh)
+            o = (wts[0].view(1, nh, 1, 1) * o_d
+                 + wts[1].view(1, nh, 1, 1) * o_w)             # (B, nh, T, hd)
+            o = o.transpose(1, 2).reshape(B, T, D)
+        else:
+            o = o_d.view(B, T, D)
+
+        return self.ln(self.proj(o) + x), None
 @dataclass
 class StreamConfig:
     vocab_size: int = 256
@@ -249,6 +576,27 @@ class StreamConfig:
     n_attn_head: int = 4
     window_size: int = 128
     n_global: int = 16
+    # RetrievalBlock v2 upgrades (all off ⇒ exact v1 behavior).
+    per_head_bias: bool = False       # per-head rel bias instead of shared
+    retr_stride: int = 0              # >0: strided far window gap
+    retr_stride_slots: int = 16       # how many strided slots per query
+    retr_mem_slots: int = 0           # >0: content-derived segment memory (count)
+    retr_mem_seg: int = 32            # bytes per memory segment
+    retr_gated: bool = False          # learned per-head pathway fusion
+    # Gated delta memory (off by default). Delta blocks also replace the LAST
+    # n_delta SSM blocks (after any retrieval blocks); pure recurrence + O(hd^2).
+    n_delta: int = 0
+    delta_head: int = 4
+    delta_window: int = 0             # >0: hybrid add exact-recent window pathway
+    delta_lam_init: float = 2.2       # gate logit bias -> lam ~= sigmoid(2.2) ~ 0.90
+    delta_beta_init: float = 0.0      # gate logit bias -> beta ~= 0.50
+    activation_checkpointing: bool = False  # trade recompute for T4 VRAM
+
+
+@dataclass
+class StreamState:
+    """Constant-size inference state for a pure Stream stack."""
+    blocks: List[SSMBlockState]
 
 
 class Stream(nn.Module):
@@ -258,14 +606,26 @@ class Stream(nn.Module):
 
         self.byte_embed = nn.Embedding(config.vocab_size, config.n_embd)
 
-        n_ssm = max(0, config.n_layer - config.n_retrieval)
+        n_ssm = max(0, config.n_layer - config.n_retrieval - config.n_delta)
         self.blocks = nn.ModuleList(
             [SSMBlock(config.n_embd, ssm_d_state=config.ssm_d_state, bias=config.bias)
              for _ in range(n_ssm)]
             + [RetrievalBlock(config.n_embd, n_head=config.n_attn_head,
                               window=config.window_size, n_global=config.n_global,
-                              bias=config.bias)
+                              bias=config.bias,
+                              per_head_bias=config.per_head_bias,
+                              stride=config.retr_stride,
+                              stride_slots=config.retr_stride_slots,
+                              mem_slots=config.retr_mem_slots,
+                              mem_seg=config.retr_mem_seg,
+                              gated=config.retr_gated)
                for _ in range(config.n_retrieval)]
+            + [DeltaMemoryBlock(config.n_embd, n_head=config.delta_head,
+                                window=config.delta_window,
+                                bias=config.bias,
+                                lam_init=config.delta_lam_init,
+                                beta_init=config.delta_beta_init)
+               for _ in range(config.n_delta)]
         )
         self.ln_f = nn.LayerNorm(config.n_embd)
 
@@ -300,14 +660,25 @@ class Stream(nn.Module):
     def forward(self, idx: torch.Tensor,
                 targets: Optional[torch.Tensor] = None,
                 return_logits: bool = False,
-                iter_num: int = 0):
+                iter_num: int = 0,
+                return_state: bool = False):
         B, T = idx.shape
         assert T <= self.config.block_size
 
         x = self.byte_embed(idx)
 
+        block_states = []
         for block in self.blocks:
-            x, _ = block(x)
+            if self.training and self.config.activation_checkpointing and not return_state:
+                # Recompute each block in backward instead of retaining its
+                # activations. `use_reentrant=False` is robust with the custom
+                # SSM autograd function and does not change model numerics.
+                x = checkpoint(lambda h, layer=block: layer(h)[0], x,
+                               use_reentrant=False)
+                block_state = None
+            else:
+                x, block_state = block(x)
+            block_states.append(block_state)
 
         x = self.ln_f(x)
         logits = self.head(x)
@@ -317,8 +688,9 @@ class Stream(nn.Module):
         else:
             loss = None
 
-        if return_logits:
-            return logits, loss
+        state = StreamState(blocks=block_states) if return_state else None
+        if return_state:
+            return logits, loss, state
         return logits, loss
 
     def _compute_loss(self, logits, targets):
@@ -352,26 +724,324 @@ class Stream(nn.Module):
         print(f"using fused AdamW: {use_fused}")
         return optimizer
 
+    def _require_streaming_blocks(self):
+        unsupported = [type(block).__name__ for block in self.blocks
+                       if not isinstance(block, SSMBlock)]
+        if unsupported:
+            joined = ', '.join(sorted(set(unsupported)))
+            raise NotImplementedError(
+                f"Stateful streaming is currently defined only for pure SSM Stream; "
+                f"{joined} needs a verified carried-state kernel first.")
+
+    @torch.no_grad()
+    def prefill(self, idx: torch.Tensor) -> Tuple[torch.Tensor, StreamState]:
+        """Encode a non-empty byte prefix and return next-byte logits and state."""
+        self._require_streaming_blocks()
+        if idx.ndim != 2 or idx.shape[1] == 0:
+            raise ValueError("prefill expects a non-empty (B, T) byte tensor")
+        if idx.shape[1] > self.config.block_size:
+            raise ValueError("prefix exceeds training block_size; chunk prefill explicitly")
+        logits, _, state = self(idx, return_state=True)
+        return logits[:, -1, :self.config.vocab_size], state
+
+    @torch.no_grad()
+    def step(self, idx: torch.Tensor, state: StreamState) -> Tuple[torch.Tensor, StreamState]:
+        """Consume one byte per batch item and return logits for its successor."""
+        self._require_streaming_blocks()
+        if idx.ndim == 2 and idx.shape[1] == 1:
+            idx = idx[:, 0]
+        if idx.ndim != 1:
+            raise ValueError("step expects (B,) or (B, 1) byte ids")
+        if len(state.blocks) != len(self.blocks):
+            raise ValueError("StreamState belongs to a different model")
+        x = self.byte_embed(idx)
+        next_states = []
+        for block, block_state in zip(self.blocks, state.blocks):
+            x, next_state = block.step(x, block_state)
+            next_states.append(next_state)
+        logits = self.head(self.ln_f(x)).view(idx.shape[0], self.config.n_predict,
+                                               self.config.vocab_size)
+        return logits[:, 0], StreamState(blocks=next_states)
+
+    @staticmethod
+    def _sample_next(logits: torch.Tensor, temperature: float, top_k: Optional[int]) -> torch.Tensor:
+        if temperature <= 0:
+            raise ValueError("temperature must be positive")
+        logits = logits / temperature
+        if top_k is not None:
+            if not 1 <= top_k <= logits.shape[-1]:
+                raise ValueError("top_k must be between 1 and vocab_size")
+            threshold = torch.topk(logits, top_k, dim=-1).values[:, [-1]]
+            logits = logits.masked_fill(logits < threshold, float('-inf'))
+        return torch.multinomial(F.softmax(logits, dim=-1), num_samples=1)
+
     @torch.no_grad()
     def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
+        """Correct one-byte autoregressive sampling with constant-size state."""
+        was_training = self.training
         self.eval()
-        np = self.config.n_predict
-        vs = self.config.vocab_size
-        generated = 0
-        while generated < max_new_tokens:
-            idx_cond = idx[:, -self.config.block_size:]
-            logits, _ = self(idx_cond)
-            logits = logits[:, -1, :].view(1, np, vs) / temperature
-            for k in range(np):
-                if generated >= max_new_tokens:
-                    break
-                probs = F.softmax(logits[:, k], dim=-1)
-                if top_k is not None:
-                    v, _ = torch.topk(probs, top_k)
-                    probs[probs < v[:, [-1]]] = 0.0
-                    probs = probs / probs.sum(dim=-1, keepdim=True)
-                idx_next = torch.multinomial(probs, num_samples=1)
+        try:
+            logits, state = self.prefill(idx)
+            for _ in range(max_new_tokens):
+                idx_next = self._sample_next(logits, temperature, top_k)
                 idx = torch.cat((idx, idx_next), dim=1)
-                generated += 1
-        self.train()
-        return idx
+                logits, state = self.step(idx_next, state)
+            return idx
+        finally:
+            self.train(was_training)
+
+
+# -----------------------------------------------------------------------------
+# RetrievalBlock v2 verification (CPU, deterministic).
+# -----------------------------------------------------------------------------
+def check_retrieval_v2(seed: int = 1337) -> Tuple[bool, str]:
+    """
+    Verifies RetrievalBlock v2:
+      (1) v2 with every feature OFF reproduces v1 exactly (byte-identical).
+      (2) every pathway is causal: output at t is independent of inputs > t.
+      (3) gradients flow to every new v2 parameter.
+      (4) full Stream(StreamR) forward/backward with v2 enabled runs cleanly.
+    """
+    torch.manual_seed(seed)
+    B, T, D_ = 2, 200, 64
+    nh = 4
+    torch.set_grad_enabled(True)
+
+    msgs = []
+
+    # (1) features-off block must equal the exact v1 formula (independent impl)
+    block = RetrievalBlock(D_, n_head=nh, window=32, n_global=8,
+                           per_head_bias=False, stride=0, mem_slots=0, gated=False)
+    x = torch.randn(B, T, D_, requires_grad=True)
+    y, _ = block(x)
+
+    # reference: rebuild v1 math inline
+    w, ng = 32, 8
+    with torch.no_grad():
+        q, k, v = block.qkv(x).chunk(3, dim=-1)
+        q = q.view(B, T, nh, D_ // nh).transpose(1, 2)
+        k_pad = F.pad(k, (0, 0, w - 1, 0))
+        v_pad = F.pad(v, (0, 0, w - 1, 0))
+        k_win = k_pad.unfold(1, w, 1).view(B, T, nh, D_ // nh, w).transpose(1, 2)
+        v_win = v_pad.unfold(1, w, 1).view(B, T, nh, D_ // nh, w).transpose(1, 2)
+        lw = torch.einsum('bhtd,bhtdw->bhtw', q, k_win) * ((D_ // nh) ** -0.5)
+        dist = (w - 1) - torch.arange(w)
+        lw = lw + block.rel_bias[dist].view(1, 1, 1, w)
+        lg = torch.einsum('bhtd,ghd->bhtg', q, block.g_k) * ((D_ // nh) ** -0.5)
+        att = torch.softmax(torch.cat([lg, lw], dim=-1), dim=-1)
+        ow = torch.einsum('bhtw,bhtdw->bhtd', att[..., ng:], v_win)
+        og = torch.einsum('bhtg,ghd->bhtd', att[..., :ng], block.g_v)
+        y_ref = block.ln(block.proj((ow + og).transpose(1, 2).reshape(B, T, D_)) + x)
+    d = (y - y_ref).abs().max().item()
+    ok1 = d < 1e-6
+    msgs.append(f"[1] v1-equivalence (features off): max|diff|={d:.2e} {'OK' if ok1 else 'FAIL'}")
+
+    # (2) causality: y[t] must not depend on inputs at positions > t
+    block_v2 = RetrievalBlock(D_, n_head=nh, window=32, n_global=8,
+                              per_head_bias=True, stride=8, stride_slots=16,
+                              mem_slots=6, mem_seg=16, gated=True)
+    x2 = torch.randn(B, T, D_, requires_grad=True)
+    y2, _ = block_v2(x2)
+    t_cut = 50
+    # gradient of output at early positions w.r.t. token at t_cut+1 (and beyond)
+    loss = y2[:, :t_cut].sum()
+    loss.backward(retain_graph=True)
+    g_leak = x2.grad[:, t_cut + 1:].abs().max().item()
+    # gradient w.r.t. an early token should be nonzero (block actually uses context)
+    g_used = x2.grad[:, :t_cut].abs().max().item()
+    ok2 = (g_leak < 1e-9) and (g_used > 0)
+    msgs.append(f"[2] causality: leak_grad={g_leak:.2e} used_grad={g_used:.2e} "
+                f"{'OK' if ok2 else 'FAIL'}")
+
+    # (3) every new v2 param receives nonzero gradient
+    block_v3 = RetrievalBlock(D_, n_head=nh, window=32, n_global=8,
+                              per_head_bias=True, stride=8, stride_slots=16,
+                              mem_slots=6, mem_seg=16, gated=True)
+    x3 = torch.randn(B, T, D_, requires_grad=True)
+    y3, _ = block_v3(x3)
+    y3.pow(2).mean().backward()
+    new_params = {
+        'rel_bias': 'per-head bias', 'stride_bias': 'stride bias',
+        'seg_q': 'segment pool query', 'mem_bias': 'memory bias',
+        'path_logits': 'pathway gate',
+    }
+    ok3 = True
+    for name, label in new_params.items():
+        p = getattr(block_v3, name)
+        gn = p.grad.abs().max().item() if p.grad is not None else 0.0
+        ok3 &= gn > 0
+        msgs.append(f"[3] grad[{name}] ({label}): {gn:.2e} {'OK' if gn > 0 else 'FAIL'}")
+    if not ok3:
+        msgs.append("[3] FAIL: some v2 params got zero gradient")
+    else:
+        msgs.append("[3] all v2 params receive gradients: OK")
+
+    # (4) full model (StreamR) forward/backward with v2 enabled on GPU/CPU
+    torch.manual_seed(seed)
+    cfg = StreamConfig(n_embd=64, n_layer=2, n_predict=4, block_size=T,
+                       ssm_d_state=4, n_retrieval=1, n_attn_head=nh,
+                       window_size=32, n_global=8,
+                       per_head_bias=True, retr_stride=8, retr_stride_slots=8,
+                       retr_mem_slots=4, retr_mem_seg=16, retr_gated=True)
+    stream = Stream(cfg)
+    idx = torch.randint(0, 256, (B, T))
+    tgt = torch.randint(0, 256, (B, T))
+    logits, loss = stream(idx, targets=tgt)
+    loss.backward()
+    n_grad = sum(1 for p in stream.parameters() if p.grad is not None)
+    n_params = sum(1 for p in stream.parameters())
+    ok4 = loss is not None and torch.isfinite(loss) and n_grad == n_params
+    n_tot = sum(p.numel() for p in stream.parameters())
+    msgs.append(f"[4] StreamR v2 full model: loss={loss.item() if loss else float('nan'):.2f} "
+                f"grads {n_grad}/{n_params} params={n_tot:,} {'OK' if ok4 else 'FAIL'}")
+
+    ok = ok1 and ok2 and ok3 and ok4
+    summary = "\n".join(msgs) + f"\nRETRIEVAL V2 SUMMARY: {'ALL PASS' if ok else 'FAIL'}"
+    return ok, summary
+
+
+# -----------------------------------------------------------------------------
+# DeltaMemoryBlock verification (CPU, deterministic).
+# -----------------------------------------------------------------------------
+def _ref_delta(block: DeltaMemoryBlock, x: torch.Tensor) -> torch.Tensor:
+    """Independent re-implementation of the delta recurrence, unrolled in a
+    different code structure (explicit per-step state list + gather) so the
+    block's fused scan and the reference cannot share a bug."""
+    B, T, D = x.shape
+    nh, hd = block.n_head, block.head_dim
+    with torch.no_grad():
+        q, k, v = block.qkv(x).chunk(3, dim=-1)
+        k_raw = k
+        k = block.k_norm(k.view(B, T, nh, hd)).view(B, T, nh, hd)
+        qh, vh = q.view(B, T, nh, hd), v.view(B, T, nh, hd)
+        g = torch.sigmoid(block.gate_logits(x))
+        lam, beta = g[..., :nh], g[..., nh:]
+        S = [torch.zeros(B, nh, hd, hd)]
+        preds = []
+        for t in range(T):
+            o = torch.einsum('bndm,bnm->bnd', S[t], qh[:, t])
+            preds.append(o)
+            err = vh[:, t] - torch.einsum('bndm,bnm->bnd', S[t], k[:, t])
+            S.append(lam[:, t].unsqueeze(-1).unsqueeze(-1) * S[t]
+                     + beta[:, t].unsqueeze(-1).unsqueeze(-1)
+                     * torch.einsum('bnd,bne->bnde', k[:, t], err))
+        o = torch.stack(preds, dim=1).reshape(B, T, D)
+        if block.window > 0:
+            # reference window pathway (mirror of block forward's layout)
+            w = block.window
+            k_pad = F.pad(k_raw, (0, 0, w - 1, 0))
+            v_pad = F.pad(v, (0, 0, w - 1, 0))
+            k_win = k_pad.unfold(1, w, 1).view(B, T, nh, hd, w).transpose(1, 2)   # (B, nh, T, hd, w)
+            v_win = v_pad.unfold(1, w, 1).view(B, T, nh, hd, w).transpose(1, 2)
+            q_pj = qh.transpose(1, 2)                                             # (B, nh, T, hd)
+            lw = torch.matmul(q_pj.unsqueeze(-2), k_win).squeeze(-2) * (hd ** -0.5)
+            dist = (w - 1) - torch.arange(w)
+            lw = lw + block.rel_bias[:, dist].unsqueeze(0).unsqueeze(2)
+            att = torch.softmax(lw, dim=-1)
+            o_w = torch.matmul(att.unsqueeze(-2), v_win.transpose(-1, -2)).squeeze(-2)   # (B, nh, T, hd)
+            wts = torch.softmax(block.path_logits.detach(), dim=0)
+            o_d = o.reshape(B, T, nh, hd).transpose(1, 2)          # (B, nh, T, hd)
+            o = (wts[0].view(1, nh, 1, 1) * o_d
+                 + wts[1].view(1, nh, 1, 1) * o_w)
+            o = o.transpose(1, 2).reshape(B, T, D)
+        return block.ln(block.proj(o) + x)
+
+
+def check_delta(seed: int = 1337) -> Tuple[bool, str]:
+    """
+    Verifies DeltaMemoryBlock:
+      (1) pure-recurrence scan equals an independently unrolled reference.
+      (2) strict causality: output at t is independent of inputs > t.
+      (3) gradients (incl. the lambda/beta gates) match finite differences.
+      (4) hybrid (window fused) path equals its independent reference.
+      (5) full Stream (Stream-D) forward/backward with n_delta=2 runs cleanly.
+    """
+    torch.manual_seed(seed)
+    B, T, D = 2, 24, 32
+    nh = 4
+    msgs = []
+
+    # (1) pure recurrence vs reference
+    block = DeltaMemoryBlock(D, n_head=nh, window=0)
+    x = torch.randn(B, T, D, requires_grad=True)
+    y, _ = block(x)
+    y_ref = _ref_delta(block, x.detach())
+    d1 = (y - y_ref).abs().max().item()
+    ok1 = d1 < 1e-6
+    msgs.append(f"[1] pure-delta scan vs reference: max|diff|={d1:.2e} {'OK' if ok1 else 'FAIL'}")
+
+    # (2) causality: early outputs must not depend on later inputs
+    x2 = torch.randn(B, T, D, requires_grad=True)
+    y2, _ = block(x2)
+    t_cut = 8
+    y2[:, :t_cut].sum().backward(retain_graph=True)
+    leak = x2.grad[:, t_cut + 1:].abs().max().item()
+    used = x2.grad[:, :t_cut].abs().max().item()
+    ok2 = (leak < 1e-9) and (used > 0)
+    msgs.append(f"[2] causality: leak_grad={leak:.2e} used_grad={used:.2e} "
+                f"{'OK' if ok2 else 'FAIL'}")
+
+    # (3) finite-difference grads on gate logits (lambda/beta) and a linear weight
+    def make():
+        b = DeltaMemoryBlock(D, n_head=nh, window=0)
+        b = b.double()
+        return b
+
+    block3 = make()
+    x3 = torch.randn(B, T, D, dtype=torch.double, requires_grad=True)
+    y3 = block3(x3)[0]
+    loss3 = y3.pow(2).mean()
+    loss3.backward()
+    ok3 = True
+    # sample params: gate_logits.bias[0] (lambda init), gate_logits.weight[0,:3], qkv.weight[0,:3]
+    checks = [('gate_logits.bias', block3.gate_logits.bias.data, 0),
+              ('gate_logits.weight', block3.gate_logits.weight.data, 0),
+              ('qkv.weight', block3.qkv.weight.data, 0)]
+    for name, pdata, idx in checks:
+        src = pdata.ravel()
+        target = (block3.get_parameter(name) if name != 'gate_logits.bias'
+                  else block3.gate_logits.bias)
+        grad = target.grad.ravel()[idx]
+        eps = 1e-4 * max(abs(src[idx].item()), 1e-3)
+        p0 = src[idx].item()
+        src[idx] = p0 + eps
+        yp = block3(x3.detach())[0].pow(2).mean().item()
+        src[idx] = p0 - eps
+        ym = block3(x3.detach())[0].pow(2).mean().item()
+        src[idx] = p0
+        fd = (yp - ym) / (2 * eps)
+        rel = abs(fd - grad.item()) / (abs(fd) + abs(grad.item()) + 1e-12)
+        ok3 &= rel < 5e-2
+        msgs.append(f"[3] FD[{name}[{idx}]] grad={grad.item():.4e} fd={fd:.4e} rel={rel:.2e} "
+                    f"{'OK' if rel < 5e-2 else 'FAIL'}")
+
+    # (4) hybrid window path vs reference
+    torch.manual_seed(seed)
+    bh = DeltaMemoryBlock(D, n_head=nh, window=6)
+    x4 = torch.randn(B, T, D, requires_grad=True)
+    y4, _ = bh(x4)
+    y4_ref = _ref_delta(bh, x4.detach())
+    d4 = (y4 - y4_ref).abs().max().item()
+    ok4 = d4 < 1e-6
+    msgs.append(f"[4] hybrid (window fused) vs reference: max|diff|={d4:.2e} {'OK' if ok4 else 'FAIL'}")
+
+    # (5) full Stream-D model
+    torch.manual_seed(seed)
+    cfg = StreamConfig(n_embd=D, n_layer=2, n_predict=4, block_size=T,
+                       ssm_d_state=4, n_delta=1,
+                       delta_head=nh, delta_window=0)
+    stream = Stream(cfg)
+    idx = torch.randint(0, 256, (B, T))
+    tgt = torch.randint(0, 256, (B, T))
+    logits, loss = stream(idx, targets=tgt)
+    loss.backward()
+    n_grad = sum(1 for p in stream.parameters() if p.grad is not None)
+    n_params = sum(1 for p in stream.parameters())
+    ok5 = loss is not None and torch.isfinite(loss) and n_grad == n_params
+    n_tot = sum(p.numel() for p in stream.parameters())
+    msgs.append(f"[5] Stream-D full model: loss={loss.item() if loss else float('nan'):.2f} "
+                f"grads {n_grad}/{n_params} params={n_tot:,} {'OK' if ok5 else 'FAIL'}")
+
+    ok = ok1 and ok2 and ok3 and ok4 and ok5
+    summary = "\n".join(msgs) + f"\nDELTA SUMMARY: {'ALL PASS' if ok else 'FAIL'}"
+    return ok, summary

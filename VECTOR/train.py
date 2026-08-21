@@ -36,6 +36,11 @@ min_lr = 6e-5
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 dtype = 'float32'
 compile = False
+# T4 execution controls. `auto` selects the verified fused/chunked Triton scan
+# by runtime shape; `off` keeps the portable TorchScript reference path.
+triton_scan = 'off'  # off | fused | chunked | auto
+activation_checkpointing = False
+log_cuda_memory = True
 # VECTOR-specific (defaults for Stream; overridden by VECTOR configs)
 model_type = 'stream'
 n_head = 4
@@ -61,6 +66,23 @@ replacement_threshold = 0.05
 expert_min_tokens = 5000
 moe_balance_coeff = 0.01
 replace_experts_interval = 0  # 0 = disabled
+# StreamR (retrieval) specific; default config comes from config files
+n_retrieval = 0
+n_attn_head = 4
+window_size = 128
+n_global = 16
+per_head_bias = False
+retr_stride = 0
+retr_stride_slots = 16
+retr_mem_slots = 0
+retr_mem_seg = 32
+retr_gated = False
+# Gated delta memory (Stream-D); default config comes from config files
+n_delta = 0
+delta_head = 4
+delta_window = 0
+delta_lam_init = 2.2
+delta_beta_init = 0.0
 
 config_keys = [k for k, v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open('configurator.py').read())
@@ -94,6 +116,11 @@ torch.manual_seed(1337 + seed_offset)
 device_type = 'cuda' if 'cuda' in device else 'cpu'
 ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
 ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
+
+if device_type == 'cuda':
+    torch.backends.cudnn.benchmark = True  # fixed-shape causal convolutions
+    if hasattr(torch, 'set_float32_matmul_precision'):
+        torch.set_float32_matmul_precision('high')
 
 # Data
 data_dir = os.path.join('data', dataset)
@@ -161,10 +188,30 @@ else:
         vocab_size=vocab_size, n_embd=n_embd, n_layer=n_layer,
         ssm_d_state=ssm_d_state, n_predict=n_predict,
         block_size=block_size, dropout=dropout, bias=bias,
+        n_retrieval=n_retrieval, n_attn_head=n_attn_head,
+        window_size=window_size, n_global=n_global,
+        per_head_bias=per_head_bias, retr_stride=retr_stride,
+        retr_stride_slots=retr_stride_slots, retr_mem_slots=retr_mem_slots,
+        retr_mem_seg=retr_mem_seg, retr_gated=retr_gated,
+        n_delta=n_delta, delta_head=delta_head, delta_window=delta_window,
+        delta_lam_init=delta_lam_init, delta_beta_init=delta_beta_init,
+        activation_checkpointing=activation_checkpointing,
     )
     gptconf = StreamConfig(**model_args)
     model = Stream(gptconf)
 model.to(device)
+
+if triton_scan != 'off':
+    if triton_scan not in {'fused', 'chunked', 'auto'}:
+        raise ValueError("triton_scan must be one of: off, fused, chunked, auto")
+    if model_type != 'stream':
+        raise ValueError('triton_scan is supported only by the Stream SSM backbone')
+    if device_type != 'cuda':
+        raise ValueError('triton_scan requires CUDA')
+    from triton_scan import enable_triton
+    enable_triton(model, auto=(triton_scan == 'auto'),
+                  fused=(triton_scan == 'fused'),
+                  chunked=(triton_scan == 'chunked'))
 
 scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16')) if device_type == 'cuda' else None
 optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
@@ -175,6 +222,29 @@ if compile:
 
 if ddp:
     model = DDP(model, device_ids=[ddp_local_rank])
+
+
+def unwrap_model():
+    """Return the actual model whether training is local, compiled, or DDP."""
+    return model.module if ddp else model
+
+
+def checkpoint_payload():
+    """Everything needed for an auditable, deterministic resume."""
+    rng_state = {'torch': torch.get_rng_state(), 'numpy': np.random.get_state()}
+    if torch.cuda.is_available():
+        rng_state['cuda'] = torch.cuda.get_rng_state_all()
+    return {
+        'format_version': 2,
+        'model_type': model_type,
+        'model': unwrap_model().state_dict(),
+        'optimizer': optimizer.state_dict(),
+        'model_args': model_args,
+        'iter_num': iter_num,
+        'best_val_loss': best_val_loss,
+        'config': config,
+        'rng_state': rng_state,
+    }
 
 # Learning rate schedule
 def get_lr(it):
@@ -208,6 +278,7 @@ best_val_loss = 1e9
 
 X, Y = get_batch('train')
 t0 = time.time()
+last_log_iter = -1
 local_iter_num = 0
 running_mfu = -1.0
 
@@ -225,16 +296,13 @@ while True:
         if losses['val'] < best_val_loss or always_save_checkpoint:
             best_val_loss = losses['val']
             if iter_num > 0:
-                checkpoint = {
-                    'model': model.state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                    'model_args': model_args,
-                    'iter_num': iter_num,
-                    'best_val_loss': best_val_loss,
-                    'config': config,
-                }
                 print(f"saving checkpoint to {out_dir}")
-                torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
+                torch.save(checkpoint_payload(), os.path.join(out_dir, 'ckpt.pt'))
+        # Evaluation is deliberately excluded from throughput telemetry.
+        if device_type == 'cuda':
+            torch.cuda.synchronize()
+        t0 = time.time()
+        last_log_iter = iter_num - 1
     if iter_num == 0 and eval_only:
         break
 
@@ -245,9 +313,8 @@ while True:
         if n_replaced > 0 and master_process:
             print(f"step {iter_num}: replaced {n_replaced} dead experts")
 
-    X, Y = get_batch('train')
-
     for micro_step in range(gradient_accumulation_steps):
+        X, Y = get_batch('train')
         if ddp:
             model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
         with ctx:
@@ -270,17 +337,27 @@ while True:
         optimizer.step()
     optimizer.zero_grad(set_to_none=True)
 
-    t1 = time.time()
-    dt = t1 - t0
-    t0 = t1
-
     if iter_num % log_interval == 0 and master_process:
+        if device_type == 'cuda':
+            torch.cuda.synchronize()
+        t1 = time.time()
+        dt = t1 - t0
+        t0 = t1
+        window_iters = iter_num - last_log_iter
+        last_log_iter = iter_num
+        bytes_per_second = tokens_per_iter * window_iters / max(dt, 1e-9)
         lossf = loss.item() * gradient_accumulation_steps
         extra = ""
         if model_type == 'vector' and hasattr(model, 'loss_debug') and model.loss_debug:
             ld = model.loss_debug
             extra = f" | pred={ld['pred']:.4f} recon={ld['recon']:.4f} budget={ld['budget']:.4f} active={ld['active_ratio']:.3f}"
-        print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%{extra}")
+        memory = ""
+        if device_type == 'cuda' and log_cuda_memory:
+            peak_gib = torch.cuda.max_memory_allocated() / (1024 ** 3)
+            memory = f", peak_vram {peak_gib:.2f}GiB"
+            torch.cuda.reset_peak_memory_stats()
+        print(f"iter {iter_num}: loss {lossf:.4f}, window {dt*1000:.2f}ms, "
+              f"{bytes_per_second / 1e6:.3f}M byte/s, mfu {running_mfu*100:.2f}%{memory}{extra}")
     iter_num += 1
     local_iter_num += 1
 
