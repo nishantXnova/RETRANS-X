@@ -213,7 +213,7 @@ if triton_scan != 'off':
                   fused=(triton_scan == 'fused'),
                   chunked=(triton_scan == 'chunked'))
 
-scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16')) if device_type == 'cuda' else None
+scaler = torch.amp.GradScaler(device_type, enabled=(dtype == 'float16')) if device_type == 'cuda' else None
 optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
 
 if compile:

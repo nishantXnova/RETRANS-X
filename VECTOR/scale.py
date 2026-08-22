@@ -44,6 +44,8 @@ DEVICE = 'cpu'
 DTYPE = torch.float32
 CTX = nullcontext()
 
+torch.manual_seed(1337)
+
 # Load data once
 train_data = np.memmap(os.path.join(DATA_DIR, 'train.bin'), dtype=np.uint8, mode='r')
 val_data = np.memmap(os.path.join(DATA_DIR, 'val.bin'), dtype=np.uint8, mode='r')

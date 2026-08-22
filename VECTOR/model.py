@@ -21,6 +21,11 @@ from torch.utils.checkpoint import checkpoint
 from dataclasses import dataclass
 from typing import Optional, Tuple, List, TYPE_CHECKING
 
+try:
+    from delta_scan import delta_scan_fused
+except Exception:            # delta_scan optional; eager loop is the fallback
+    delta_scan_fused = None
+
 
 # -----------------------------------------------------------------------------
 # SSM scan: JIT-compiled sequential recurrence.
@@ -232,6 +237,48 @@ class SSMBlockState:
 # -----------------------------------------------------------------------------
 # Sparse Retrieval Block v2: multi-pathway content recall, O(n) memory.
 # -----------------------------------------------------------------------------
+def _causal_window(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+                   w: int, rel_bias: torch.Tensor, per_head: bool,
+                   chunk: Optional[int] = None) -> torch.Tensor:
+    """Exact causal window attention with bounded peak memory.
+
+    Same math as the full `unfold` formulation, but key/value windows are
+    materialized per query-chunk so the (B, T, D, w) intermediate never
+    exists in full (peak O(B*C*D*w) instead of O(B*T*D*w) -- at leg B this
+    is the difference between ~4.3 GB of temporaries and ~67 MB).
+
+    q: (B, nh, T, hd); k, v: raw (B, T, D); rel_bias shared (2w-1,) or
+    per-head (nh, 2w-1). Returns (B, nh, T, hd). When C >= T this reduces
+    to exactly one full-sequence chunk (identical op sequence as before).
+    """
+    B, nh, T, hd = q.shape
+    D = k.shape[-1]
+    if chunk is None:
+        # keep each chunk's window temporaries <= ~2**24 elements
+        chunk = max(64, min(T, int((2 ** 24) // max(1, B * D * w))))
+    chunk = min(chunk, T)
+    k_pad = F.pad(k, (0, 0, w - 1, 0))   # left-pad: query t sees keys t-w+1..t
+    v_pad = F.pad(v, (0, 0, w - 1, 0))
+    dist = (w - 1) - torch.arange(w, device=q.device)
+    if per_head:
+        bias = rel_bias[:, dist].view(1, nh, 1, w)
+    else:
+        bias = rel_bias[dist].view(1, 1, 1, w)
+    outs = []
+    for s0 in range(0, T, chunk):
+        s1 = min(s0 + chunk, T)
+        L = s1 - s0
+        kw = k_pad[:, s0:s1 + w - 1].unfold(1, w, 1)          # (B, L, D, w)
+        vw = v_pad[:, s0:s1 + w - 1].unfold(1, w, 1)
+        kw = kw.view(B, L, nh, hd, w).transpose(1, 2)         # (B, nh, L, hd, w)
+        vw = vw.view(B, L, nh, hd, w).transpose(1, 2)
+        lw = torch.einsum('bhtd,bhtdw->bhtw', q[:, :, s0:s1], kw) * (hd ** -0.5)
+        lw = lw + bias
+        att_w = torch.softmax(lw, dim=-1)
+        outs.append(torch.einsum('bhtw,bhtdw->bhtd', att_w, vw))
+    return torch.cat(outs, dim=2)
+
+
 class RetrievalBlock(nn.Module):
     """
     Gives the SSM backbone content-based recall which a fixed d_state recurrence
@@ -351,19 +398,7 @@ class RetrievalBlock(nn.Module):
         outs = []
 
         # ---- pathway 1: dense window (v1 mechanism, optional per-head bias) ----
-        k_pad = F.pad(k, (0, 0, w - 1, 0))
-        v_pad = F.pad(v, (0, 0, w - 1, 0))
-        k_win = k_pad.unfold(1, w, 1).view(B, T, nh, hd, w).transpose(1, 2)
-        v_win = v_pad.unfold(1, w, 1).view(B, T, nh, hd, w).transpose(1, 2)
-        lw = torch.einsum('bhtd,bhtdw->bhtw', q, k_win) * (hd ** -0.5)
-        dist = (w - 1) - torch.arange(w, device=x.device)
-        if self.per_head_bias:
-            lw = lw + self.rel_bias[:, dist].unsqueeze(0).unsqueeze(2)
-        else:
-            lw = lw + self.rel_bias[dist].view(1, 1, 1, w)
-        att_w = torch.softmax(lw, dim=-1)
-        ow = torch.einsum('bhtw,bhtdw->bhtd', att_w, v_win)
-        outs.append(ow)
+        outs.append(_causal_window(q, k, v, w, self.rel_bias, self.per_head_bias))
 
         # ---- pathway 2: strided far window (exact recall at distance) ----
         if self.stride > 0:
@@ -475,14 +510,14 @@ class DeltaMemoryBlock(nn.Module):
         self.window = window
         self.head_dim = n_embd // n_head
         self.per_head_bias = per_head_bias
+        self.lam_init = lam_init
+        self.beta_init = beta_init
+        self._use_fused = False   # set True by delta_scan.enable_delta_triton
 
         self.qkv = nn.Linear(n_embd, 3 * n_embd, bias=bias)
         # per-head gate logits: [lambda_raw, beta_raw] -> (B, T, 2*nh)
         self.gate_logits = nn.Linear(n_embd, 2 * n_head, bias=True)
-        with torch.no_grad():
-            self.gate_logits.weight.zero_()
-            self.gate_logits.bias[0:n_head] = lam_init
-            self.gate_logits.bias[n_head:2 * n_head] = beta_init
+        self.reset_gate_bias()
         self.k_norm = nn.LayerNorm(self.head_dim, bias=False)   # per-head RMS-ish
         self.proj = nn.Linear(n_embd, n_embd, bias=bias)
         self.ln = nn.LayerNorm(n_embd)
@@ -494,8 +529,27 @@ class DeltaMemoryBlock(nn.Module):
                 self.rel_bias = nn.Parameter(torch.zeros(2 * window - 1))
             self.path_logits = nn.Parameter(torch.zeros(2, n_head))
 
-    @torch.jit.ignore
+    def reset_gate_bias(self):
+        """Zero the gate weights and pin the lambda/beta logit biases.
+
+        MUST be (re-)applied after any blanket nn.Linear re-initialization
+        (e.g. Stream._init_weights via self.apply), which would otherwise
+        wipe the pinned biases: sigmoid(0)=0.5 decay instead of ~0.90."""
+        with torch.no_grad():
+            self.gate_logits.weight.zero_()
+            self.gate_logits.bias.zero_()
+            nh = self.n_head
+            self.gate_logits.bias[0:nh] = self.lam_init
+            self.gate_logits.bias[nh:] = self.beta_init
+
     def _delta_scan(self, S, q, k, v, lam, beta):
+        """Dispatch: fused Triton kernel on CUDA when enabled, else eager loop."""
+        if self._use_fused and delta_scan_fused is not None and q.is_cuda:
+            return delta_scan_fused(q, k, v, lam, beta)
+        return self._delta_scan_eager(S, q, k, v, lam, beta)
+
+    @torch.jit.ignore
+    def _delta_scan_eager(self, S, q, k, v, lam, beta):
         """Sequential delta recurrence over T, vectorized over (B, nh).
         S:   (B, nh, hd, hd)  state (zeros at entry)
         q/k/v: (B, T, nh, hd)
@@ -539,17 +593,8 @@ class DeltaMemoryBlock(nn.Module):
         if w > 0:
             # hybrid pathway: exact-recent window, fused with the associative
             # response by a learned per-head gate over [matrix, window].
-            k_pad = F.pad(k_raw, (0, 0, w - 1, 0))
-            v_pad = F.pad(v, (0, 0, w - 1, 0))
-            k_win = k_pad.unfold(1, w, 1).view(B, T, nh, hd, w).transpose(1, 2)  # (B, nh, T, hd, w)
-            v_win = v_pad.unfold(1, w, 1).view(B, T, nh, hd, w).transpose(1, 2)
-            q_pj = qh.transpose(1, 2)                          # (B, nh, T, hd)
-            lw = torch.matmul(q_pj.unsqueeze(-2), k_win).squeeze(-2)  # (B, nh, T, w)
-            lw = lw * (hd ** -0.5)
-            dist = (w - 1) - torch.arange(w, device=x.device)
-            lw = lw + self.rel_bias[:, dist].unsqueeze(0).unsqueeze(2)
-            att_w = torch.softmax(lw, dim=-1)                  # (B, nh, T, w)
-            o_w = torch.matmul(att_w.unsqueeze(-2), v_win.transpose(-1, -2)).squeeze(-2)  # (B, nh, T, hd)
+            o_w = _causal_window(qh.transpose(1, 2), k_raw, v, w,
+                                 self.rel_bias, self.per_head_bias)  # (B, nh, T, hd)
 
             o_d = o_d.transpose(1, 2)                          # (B, nh, T, hd)
             wts = torch.softmax(self.path_logits, dim=0)       # (2, nh)
@@ -636,6 +681,11 @@ class Stream(nn.Module):
         )
 
         self.apply(self._init_weights)
+        # self.apply re-initialized every nn.Linear above, which wipes the
+        # pinned lambda/beta gate biases of DeltaMemoryBlock -- re-pin them.
+        for _m in self.modules():
+            if isinstance(_m, DeltaMemoryBlock):
+                _m.reset_gate_bias()
         for pn, p in self.named_parameters():
             # out_proj / c_proj / retrieval proj get GPT-2-style residual scaling.
             # '.proj.weight' matches only the retrieval block's proj (dt_proj and
@@ -895,7 +945,30 @@ def check_retrieval_v2(seed: int = 1337) -> Tuple[bool, str]:
     msgs.append(f"[4] StreamR v2 full model: loss={loss.item() if loss else float('nan'):.2f} "
                 f"grads {n_grad}/{n_params} params={n_tot:,} {'OK' if ok4 else 'FAIL'}")
 
-    ok = ok1 and ok2 and ok3 and ok4
+    # (5) chunked window pathway == full-unfold reference (multi-chunk forced)
+    torch.manual_seed(seed)
+    Bw, Tw, ww, nhw = 2, 200, 32, 4
+    Dw = nhw * 16
+    qw = torch.randn(Bw, nhw, Tw, 16)
+    kw = torch.randn(Bw, Tw, Dw)
+    vw = torch.randn(Bw, Tw, Dw)
+    rb = torch.randn(nhw, 2 * ww - 1) * 0.1
+    o_chunked = _causal_window(qw, kw, vw, ww, rb, per_head=True, chunk=48)
+    k_pad = F.pad(kw, (0, 0, ww - 1, 0))
+    v_pad = F.pad(vw, (0, 0, ww - 1, 0))
+    k_full = k_pad.unfold(1, ww, 1).view(Bw, Tw, nhw, 16, ww).transpose(1, 2)
+    v_full = v_pad.unfold(1, ww, 1).view(Bw, Tw, nhw, 16, ww).transpose(1, 2)
+    lw = torch.einsum('bhtd,bhtdw->bhtw', qw, k_full) * (16 ** -0.5)
+    dist_w = (ww - 1) - torch.arange(ww)
+    lw = lw + rb[:, dist_w].unsqueeze(0).unsqueeze(2)
+    att_f = torch.softmax(lw, dim=-1)
+    o_full = torch.einsum('bhtw,bhtdw->bhtd', att_f, v_full)
+    d5 = (o_chunked - o_full).abs().max().item()
+    ok5 = d5 < 1e-5
+    msgs.append(f"[5] chunked window vs full unfold (forced multi-chunk): "
+                f"max|diff|={d5:.2e} {'OK' if ok5 else 'FAIL'}")
+
+    ok = ok1 and ok2 and ok3 and ok4 and ok5
     summary = "\n".join(msgs) + f"\nRETRIEVAL V2 SUMMARY: {'ALL PASS' if ok else 'FAIL'}"
     return ok, summary
 
@@ -955,6 +1028,7 @@ def check_delta(seed: int = 1337) -> Tuple[bool, str]:
       (3) gradients (incl. the lambda/beta gates) match finite differences.
       (4) hybrid (window fused) path equals its independent reference.
       (5) full Stream (Stream-D) forward/backward with n_delta=2 runs cleanly.
+      (6) lambda/beta gate biases stay pinned after Stream's blanket re-init.
     """
     torch.manual_seed(seed)
     B, T, D = 2, 24, 32
@@ -1042,6 +1116,23 @@ def check_delta(seed: int = 1337) -> Tuple[bool, str]:
     msgs.append(f"[5] Stream-D full model: loss={loss.item() if loss else float('nan'):.2f} "
                 f"grads {n_grad}/{n_params} params={n_tot:,} {'OK' if ok5 else 'FAIL'}")
 
-    ok = ok1 and ok2 and ok3 and ok4 and ok5
+    # (6) gate-bias pinning survives blanket re-initialization
+    torch.manual_seed(seed)
+    cfg6 = StreamConfig(n_embd=D, n_layer=1, n_predict=2, block_size=T,
+                        ssm_d_state=4, n_delta=1, delta_head=nh)
+    dblock = Stream(cfg6).blocks[-1]
+    lam0 = torch.sigmoid(dblock.gate_logits.bias[:nh])
+    bet0 = torch.sigmoid(dblock.gate_logits.bias[nh:])
+    w0 = dblock.gate_logits.weight.abs().max().item()
+    exp_lam = torch.sigmoid(torch.tensor(dblock.lam_init)).item()
+    exp_bet = torch.sigmoid(torch.tensor(dblock.beta_init)).item()
+    ok6 = (torch.allclose(lam0, torch.full_like(lam0, exp_lam), atol=1e-5)
+           and torch.allclose(bet0, torch.full_like(bet0, exp_bet), atol=1e-5)
+           and w0 == 0.0)
+    msgs.append(f"[6] gate-bias pinned after _init_weights: "
+                f"lam={lam0[0].item():.3f} (exp {exp_lam:.3f}) beta={bet0[0].item():.3f} "
+                f"(exp {exp_bet:.3f}) |W|max={w0:.1e} {'OK' if ok6 else 'FAIL'}")
+
+    ok = ok1 and ok2 and ok3 and ok4 and ok5 and ok6
     summary = "\n".join(msgs) + f"\nDELTA SUMMARY: {'ALL PASS' if ok else 'FAIL'}"
     return ok, summary
