@@ -130,3 +130,53 @@ reversible checkpoints after the baseline is stable.
 `run_id,git_sha,data_manifest,seed,params,train_bytes,train_flops,wall_time,peak_mem,BPB_all,BPB_long,BPB_code,needle_accuracy,prefill_bytes_s,decode_bytes_s,decode_state_bytes,valid_utf8_rate`
 
 The system is genuinely better only when it improves this Pareto frontier.
+
+---
+
+## Re-verification — 2026-09-23 (appends, does not rewrite, the above)
+
+Method: read the code, ran the CPU checks. Each finding below is
+CLOSED (fixed + verified), PARTIAL, or OPEN.
+
+### Stop-ship findings
+
+| # | Was | Now | Verdict |
+|---|---|-----|---------|
+| 1 | Sampling imports nonexistent API, GPT-2 tokens | `sample.py` is byte-native: UTF-8 encode prompt, `model.generate`, UTF-8 decode with `errors='replace'`; handles `torch.compile` `_orig_mod.` prefix | CLOSED |
+| 2 | Multi-byte heads sampled as if autoregressive | `generate()` is strictly one-byte via `prefill`/`step`; `n_predict` is a training auxiliary with decayed weights `[1.0,.35,.15,.05]` | CLOSED |
+| 3 | No carried state, O(T^2) decode | `StreamState` + `prefill` + `step`; stepwise == full-forward to ~1e-7 (patch 0 and 2); `tests/test_stream_contract.py` 6/6 | CLOSED for pure SSM |
+| 4 | StreamR contains attention | Still true: `RetrievalBlock` is windowed attention. Position: ablation-only, `n_retrieval=0` default, `prefill`/`step` refuse non-SSM stacks | PARTIAL (contained, not removed) |
+| 5 | Delta memory is a Python loop, resets every forward | Still an eager per-step loop (no fused carried-state kernel), but FP32 accumulation landed and true RMSNorm replaced the fake one; no inference `step` until a fused kernel exists | PARTIAL |
+| 6 | No torch locally, only syntax checked | CPU torch in `VECTOR/.venv_gpu`; `check_delta`, `check_retrieval_v2`, contract tests all PASS. No CI yet | PARTIAL (local yes, CI no) |
+
+### Architecture hazards
+
+- Fused selective scan: DONE (`triton_scan.py`, ~5x end-to-end, chunked + auto-dispatch B·H≤128). Chunk-boundary recompute in backward: DONE.
+- Log-uniform timescale init: OPEN — `A_log` still zero-init (`model.py:171`), all modes start identically.
+- RMSNorm-vs-LayerNorm: CLOSED (`RMSNorm` class, used in delta block).
+- StreamR padding/mask alignment: CLOSED by test — v2 verifies causality (`leak_grad=0`) and chunked-window equivalence.
+- Mixed precision: PARTIAL — fp16 + GradScaler on T4, FP32 state; no tolerance-tested BF16 gate (T4 lacks BF16 cores, so fp16 is the path).
+
+### Data and training — still OPEN as a block
+
+Document-first splits, packed loader, 100+ batch validation with seeds,
+BPB/needle/UTF-8-rate metrics, checkpoint RNG+manifest. None of this has
+landed. It is now the weakest section of the repo.
+
+### Benchmark replacement — PARTIAL
+
+`bench_t4.py` records device, config, scan path, median/p10/p90 with
+synchronized warm runs, peak VRAM, throughput. Still missing: fixed
+checkpoint across lengths, backward/optimizer split, equal-FLOP comparisons,
+and most of the required result row (no BPB slices, no prefill/decode rates,
+no state-byte counts).
+
+### Phase gates
+
+- Phase 0: near-complete. Trains, resumes, samples valid UTF-8 via
+  `sample.py`; BPB with CIs still missing.
+- Phase 1: pure-SSM streaming gate PASSED (tolerance 1e-7, O(1) state).
+  Fused chunked scan gate PASSED (reference vs fused vs chunked <1e-4).
+- Phase 2: patcher implemented (causal, residual) but NOT ablated against
+  equal-FLOP byte-only. Delta block NOT ablated. Gate criteria unmet.
+- Phase 3: untouched, correctly so.
