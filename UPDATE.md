@@ -4,6 +4,53 @@
 
 ---
 
+## 2026-09-23 — Stream fixes committed, website overhaul, README rewrite
+
+### Overview
+
+Two tracks: (1) verified and committed a large batch of uncommitted Stream work plus hard dependencies, (2) overhauled the research site (shared stylesheet, markup bugs, de-slop), (3) rewrote the root README to match reality.
+
+### Track 1: Stream training code (commits `82bd1d6`, `e15de4c`)
+
+Found uncommitted in the working tree, verified on CPU torch, then committed:
+
+- **Decayed multi-horizon loss** (`model.py`, `moe_stream.py`) — horizons weighted `[1.0, .35, .15, .05]` normalized. Fixes the equal-weighting bug where far horizons had fewer labels but equal influence (`ENGINEERING_AUDIT.md`).
+- **Causal `BytePatcher`** (`model.py`, `patch_factor` 2/4, default 0) — groups bytes into latents, cuts SSM work/memory by Px, byte-rate residual preserved for spelling/code/Unicode. Buffered `step()` keeps O(1) decode.
+- **True `RMSNorm`** — replaces the `LayerNorm`-called-RMS-ish in `DeltaMemoryBlock` (audit correctness hazard).
+- **FP32 delta-state accumulation** — projections may be fp16, state stays fp32.
+- **`beta_init` -2.2** — low write-init (~0.10) prevents early memory corruption.
+- **1-byte `prefill`/`step`/`generate`** — the four-heads-from-one-prefix decoder is gone; far heads are training auxiliary only.
+- **Fixed `step()` docstring** — claimed Delta/Retrieval support that `_require_streaming_blocks` explicitly rejects.
+- **Committed hard dependencies** — `apple_scan.py`, `apple_optimize.py`, `ENGINEERING_AUDIT.md` were untracked; fresh clones would have broken on import.
+
+### Verification (all CPU, before push)
+
+- `check_delta`: ALL PASS (incl. finite-difference gradient check)
+- `check_retrieval_v2`: ALL PASS (v1-equivalence, causality, chunked window)
+- `tests/test_stream_contract`: 6/6 OK
+- `prefill`/`step` == full-forward to ~1e-7 for `patch_factor` 0 and 2
+
+### Track 2: Website (commits `9bc1494`, `017c6b3`, `163450a`, `00dd2af`)
+
+- **New shared `assets/site.css` + `assets/site.js`** — one palette, one callout system (info/warn/bad/good), scrollspy TOC. `index.html`, `efficiency.html`, `moe.html` link it; per-page `<style>` keeps only page-specific rules.
+- **Markup bugs fixed** — orphan figure div (div count 147/148 → balanced), duplicate §5.6/§5.7 headings, VECTOR subsections 3.x → 4.x under §4, double-arrow link, §5.11 dash-tables → PENDING card.
+- **De-slop** — changelog replaces marketing callouts, "Breakthrough" → "Result", §5.9 dev arc collapses into `<details>`, wide tables scroll, rainbow inline styles removed, unverified absolute ("GPT cannot compete at all") scoped to a projection.
+- **`stream_pipeline.html`** — kept its SVG design; wired nav both ways (was orphaned), added Diagrams entry to index nav, cross-linked §5.9 reference.
+- Served locally, all four pages + stylesheet return 200.
+
+### Track 3: README (commit `204bed4`)
+
+Root README rewritten: stale CPU benchmark table and old scaling numbers removed, current stack (Triton auto-dispatch, decayed horizons, prefill/step, Muon, T4 configs), honest results table, site links. `VECTOR/README.md` untouched (already current).
+
+### Left for next session
+
+- Packed document loader with boundary masks (audit data section still weakest)
+- T4 end-to-end timing refresh for `index.html` §5.4
+- Still untracked (intentional): `resonant_stream.py`, `manim_stream/`, `media/`, `paper/` build artifacts
+- Housekeeping: remove dead `VECTOR/.venv` (linux paths on Windows), add pytest to `.venv_gpu`
+
+---
+
 ## 2026-07-22 — Batch-alignment, cu_seqlens removal, gate bypass fix
 
 ### Overview

@@ -102,3 +102,31 @@ If the gate drops most atoms, MoE sees very few tokens → load-balance loss can
 - [ ] T_eff clamp in gate forward (respect T_min/T_max from config)
 - [ ] Per-modality log_theta (separate threshold per input type)
 - [ ] Packed varlen batching (when you're ready to implement it for real)
+
+---
+
+## 2026-09-23 — brain dump (written mid-session, unfiltered)
+
+So the user came in hot with "DO EXCELLENT = GET MORE TOKENS, DO BAD = GET KICKED" which is funny because I don't actually get tokens for doing well. But fine. Energy is energy. Let's work.
+
+First thing I did was read the whole repo. README, PROPOSAL, ENGINEERING_AUDIT, VECTOR_ARCHITECTURE, DEV_NOTES (this file). The audit doc is brutal and correct — it's the best thing in the repo. Whoever wrote it (past-me? the user? some earlier session?) did the honest thing: sampling imports a nonexistent API, multi-byte generation samples four heads from the same prefix, no carried state so decode is O(T²), StreamR is literally attention wearing a trenchcoat. All true. It stings to read your own codebase described like that, but every line checked out when I looked at the code.
+
+Then the surprise: `git status` showed a MOUNTAIN of uncommitted work. Someone — a previous session, presumably me — had already implemented half my recommendations and never committed. Decayed horizon weights in both model.py and moe_stream.py. A whole causal BytePatcher with buffered step(). RMSNorm replacing the fake "RMS-ish" LayerNorm. FP32 delta accumulation. The generate() fix. All sitting in the working tree, uncommitted, one `git reset --hard` away from oblivion. My stomach dropped a little. Commit your work, people. That became the theme of the day: commit early, commit in pieces, push so you can walk away.
+
+Verification went suspiciously well, which made me suspicious. check_delta ALL PASS, check_retrieval_v2 ALL PASS, 6/6 contract tests, prefill/step equivalence to 1e-7 for patch 0 AND patch 2. When everything passes on the first try I assume I'm testing the wrong thing. But no — the tests are real (finite-difference gradients, causality leak checks, stepwise-vs-full). The patcher step logic has genuinely tricky causality (the latent you just completed must NOT be visible to the current byte) and the code handles it by holding `state.last_latent` from before the update. There's even a comment admitting the ordering subtlety. I believe it because the numbers say so, not because the comment sounds confident.
+
+One real wart I found: `step()`'s docstring claimed it supports Delta and Retrieval, while `_require_streaming_blocks` raises NotImplementedError for exactly those blocks. Docstring lying about capability is how the next bug gets born. One-line fix.
+
+Environment annoyances, because nothing is ever clean:
+- System python has no torch. There's a `.venv` (linux-style, dead on Windows) and a `.venv_gpu` (windows, torch 2.13 CPU). Took three tries to find the interpreter that works. The audit's "PyTorch is absent" line is still spiritually true.
+- PowerShell quoting is my nemesis. `python3 -c "..."` with nested quotes dies. `Select-String` with escaped quotes dies. I ended up writing temp scripts to `Temp\opencode\` for anything with quotes in it. Ugly but reliable. If I ever complain about a shell, it's this one.
+- `python -m unittest tests.test_stream_contract` fails with ModuleNotFoundError unless PYTHONPATH is set AND you run from VECTOR/ with `.\.venv_gpu\...` (not `.\VECTOR\.venv_gpu\...`, path depends on cwd, obviously, but I still got it wrong once). Five seconds of confusion each time, every time.
+- No pytest in the venv, so unittest it is. Fine. unittest is fine. Nobody believes me.
+
+Then the website. The user said "buggy, ai slop looking" and they were right on both counts. The bugs were satisfying to find with a script instead of eyeballs: div count 147 open / 148 close — exactly one orphan — which led me straight to the Figure 5 block that was missing its `.figure-container` opener. A machine counted what no human would. Duplicate "5.6/5.7 Memory Scaling" headings. VECTOR subsections numbered 3.x under section 4. A link with TWO arrows (→ ... ›). Tables of em-dashes where results should be. And the rainbow: every nav link its own neon color, green cells, red cells, orange caveats. It looked like a dashboard that was trying to sell me something.
+
+The de-slop philosophy I landed on: one palette, one callout system, facts keep their weight without adjectives. "Breakthrough: Crossover Confirmed" → "Result: crossover near T≈9k". Same data. Half the embarrassment. The 10-step dev-arc listicle is genuinely good content but it's a wall — `<details>` collapse keeps it for the curious without taxing everyone else.
+
+False alarm I'm slightly embarrassed about: I thought the titles had mojibake (`Stream � Architecture`) and started planning an encoding fix. Hexdump showed clean UTF-8 em-dashes. The `�` was my own file-reading tool mangling the character in transit. I almost "fixed" a bug that was in my glasses, not the file. Lesson: verify with bytes before announcing.
+
+What I'd do next session: packed-doc loader (the audit's data section is still the weakest link — byte-offset splits, 2-batch validation), then the T4 end-to-end timing row refresh for §5.4. And delete `.venv` (the dead linux one) before it confuses someone again. And maybe pytest in `.venv_gpu`. Small things. The codebase is in better shape than it was this morning, and more importantly it's ALL COMMITTED. `git log` tells the story: 82bd1d6, e15de4c, then the site series. You could nuke this laptop and lose nothing. That's the real deliverable.
