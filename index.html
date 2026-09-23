@@ -6,148 +6,11 @@
 <title>Stream: Continuous Byte-Level State Space Language Models</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Source+Serif+4:ital,wght@0,400;0,600;1,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/site.css">
 <style>
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-:root {
-  --bg: #0a0a0a;
-  --surface: #111111;
-  --surface2: #1a1a1a;
-  --border: #222222;
-  --text: #e0e0e0;
-  --text2: #888888;
-  --accent: #ffffff;
-  --green: #4ade80;
-  --yellow: #facc15;
-  --red: #f87171;
-  --blue: #60a5fa;
-  --purple: #a78bfa;
-  --orange: #fb923c;
-  --cyan: #22d3ee;
-  --font: 'Source Serif 4', Georgia, Cambria, 'Times New Roman', serif;
-  --head: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-  --mono: 'JetBrains Mono', monospace;
-}
-body { font-family: var(--font); background: var(--bg); color: var(--text); line-height: 1.7; -webkit-font-smoothing: antialiased; }
-h1, h2, h3, h4 { font-family: var(--head); }
-.container { max-width: 1100px; margin: 0 auto; padding: 2rem 1.5rem; }
+/* Page-specific: none. All styling lives in assets/site.css. */
+.container { max-width: 1100px; }
 
-/* Paper header */
-.masthead { display: flex; align-items: baseline; justify-content: space-between; border-bottom: 1px solid var(--border); padding-bottom: 1.25rem; margin-bottom: 1.5rem; }
-.masthead .identity { font-family: var(--head); text-align: left; }
-.masthead .identity .lab { font-size: 1rem; font-weight: 700; letter-spacing: 0.18em; text-transform: uppercase; color: var(--accent); }
-.masthead .identity .note { font-size: 0.7rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--text2); margin-top: 0.15rem; }
-.masthead .headline { text-align: center; flex: 1; padding: 0 1.5rem; }
-.masthead .headline h1 { font-size: 2.1rem; font-weight: 600; letter-spacing: -0.02em; color: var(--accent); line-height: 1.25; margin-bottom: 0.4rem; }
-.masthead .headline .sub { font-size: 0.78rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text2); }
-.masthead .colophon { font-family: var(--head); text-align: right; font-size: 0.78rem; line-height: 1.5; }
-.masthead .colophon .line { color: var(--text2); }
-.masthead .colophon .line.strong { color: var(--accent); font-weight: 500; }
-.paper-header { margin-bottom: 2rem; text-align: center; }
-.paper-header .badge { display: inline-block; font-size: 0.65rem; padding: 0.2rem 0.6rem; border-radius: 3px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; margin-bottom: 1rem; background: rgba(96, 165, 250, 0.15); color: var(--blue); border: 1px solid rgba(96, 165, 250, 0.3); }
-.paper-header .authors { font-size: 0.95rem; color: var(--text2); margin-bottom: 0.5rem; }
-.paper-header .affiliation { font-size: 0.8rem; color: var(--text2); margin-bottom: 1rem; }
-.paper-header .date { font-size: 0.75rem; color: var(--text2); }
-.paper-nav { display: flex; gap: 0.5rem; justify-content: center; flex-wrap: wrap; margin-top: 1.25rem; }
-.paper-nav a { color: var(--text2); text-decoration: none; font-size: 0.75rem; padding: 0.3rem 0.75rem; border: 1px solid var(--border); border-radius: 4px; transition: all 0.15s; font-family: var(--head); }
-.paper-nav a:hover { color: var(--accent); border-color: var(--text2); }
-.paper-nav a.active { color: var(--accent); border-color: var(--accent); }
-@media (max-width: 768px) { .masthead { flex-direction: column; align-items: center; gap: 1rem; text-align: center; } .masthead .identity, .masthead .colophon { text-align: center; } .masthead .headline { padding: 0; } .masthead .headline h1 { font-size: 1.6rem; } }
-
-/* Section styling */
-.section { margin-bottom: 2.5rem; }
-.section h2 { font-size: 1.35rem; font-weight: 600; color: var(--accent); margin-bottom: 1rem; padding-bottom: 0.4rem; border-bottom: 1px solid var(--border); letter-spacing: -0.01em; }
-.section h3 { font-size: 1.05rem; font-weight: 600; color: var(--accent); margin: 1.25rem 0 0.6rem; }
-.section p { font-size: 0.92rem; color: var(--text); margin-bottom: 0.75rem; line-height: 1.75; }
-.section .note { font-size: 0.82rem; color: var(--text2); margin-bottom: 0.75rem; }
-
-/* What changed callouts */
-.what-changed { border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 8px; padding: 1.75rem 1.75rem 1.5rem; margin-bottom: 2.5rem; background: var(--surface); }
-.what-changed .kicker { font-family: var(--head); font-size: 0.68rem; font-weight: 600; letter-spacing: 0.16em; text-transform: uppercase; color: var(--text2); margin-bottom: 1.25rem; }
-.what-changed .callout { display: flex; gap: 1.25rem; padding: 1.25rem 0; border-top: 1px solid var(--border); }
-.what-changed .callout:first-of-type { border-top: none; padding-top: 0; }
-.what-changed .callout:last-of-type { padding-bottom: 0; }
-.what-changed .callout .num { font-family: var(--mono); font-size: 0.8rem; color: var(--text2); padding-top: 0.3rem; min-width: 2.4rem; }
-.what-changed .callout h3 { font-family: var(--head); font-size: 1rem; font-weight: 600; color: var(--accent); margin: 0 0 0.35rem; }
-.what-changed .callout p { font-size: 0.88rem; color: var(--text); margin: 0; line-height: 1.6; }
-@media (max-width: 768px) { .what-changed .callout { flex-direction: column; gap: 0.4rem; } }
-
-.figure-container { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; margin: 1.25rem 0; text-align: center; overflow: hidden; }
-.figure-container img { max-width: 100%; height: auto; border-radius: 4px; display: block; margin: 0 auto; }
-.figure-container .caption { font-size: 0.8rem; color: var(--text2); margin-top: 0.6rem; text-align: left; }
-
-.math { font-family: var(--mono); font-size: 0.85rem; color: var(--cyan); background: var(--surface2); padding: 0.1rem 0.3rem; border-radius: 3px; }
-.math-block { font-family: var(--mono); font-size: 0.85rem; color: var(--cyan); background: var(--surface2); padding: 0.75rem 1rem; border-radius: 6px; margin: 0.75rem 0; overflow-x: auto; white-space: pre; border: 1px solid var(--border); }
-
-ul, ol { margin: 0.5rem 0 0.75rem 1.5rem; }
-li { font-size: 0.9rem; color: var(--text); margin-bottom: 0.3rem; }
-
-/* Card grid */
-.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; margin-bottom: 1.5rem; }
-.grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1.25rem; margin-bottom: 1.5rem; }
-@media (max-width: 768px) { .grid-2, .grid-3 { grid-template-columns: 1fr; } }
-
-.card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.25rem; margin-bottom: 1rem; }
-.card .card-title { font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text2); margin-bottom: 0.5rem; }
-.card .value { font-size: 1.4rem; font-weight: 300; color: var(--accent); margin: 0.15rem 0; }
-.card .value.small { font-size: 1rem; }
-
-table { width: 100%; border-collapse: collapse; margin-bottom: 1rem; }
-th { text-align: left; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text2); padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border); font-weight: 500; }
-td { padding: 0.45rem 0.75rem; border-bottom: 1px solid var(--border); font-size: 0.82rem; }
-
-.status-badge { display: inline-block; font-size: 0.6rem; padding: 0.15rem 0.45rem; border-radius: 3px; font-weight: 600; letter-spacing: 0.03em; }
-.status-badge.pass { background: rgba(74, 222, 128, 0.15); color: var(--green); border: 1px solid rgba(74, 222, 128, 0.3); }
-.status-badge.warn { background: rgba(250, 204, 21, 0.15); color: var(--yellow); border: 1px solid rgba(250, 204, 21, 0.3); }
-.status-badge.fail { background: rgba(248, 113, 113, 0.15); color: var(--red); border: 1px solid rgba(248, 113, 113, 0.3); }
-.status-badge.pending { background: rgba(96, 165, 250, 0.15); color: var(--blue); border: 1px solid rgba(96, 165, 250, 0.3); }
-.status-badge.info { background: rgba(167, 139, 250, 0.15); color: var(--purple); border: 1px solid rgba(167, 139, 250, 0.3); }
-
-/* Test report */
-.test-block { background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; padding: 0.75rem; margin-bottom: 0.75rem; }
-.test-block .test-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.4rem; }
-.test-block .test-name { font-size: 0.85rem; font-weight: 500; color: var(--accent); }
-.test-block .test-meta { font-size: 0.7rem; color: var(--text2); }
-.test-block .test-stats { display: flex; gap: 1.5rem; flex-wrap: wrap; font-size: 0.8rem; color: var(--text2); margin-top: 0.35rem; }
-.test-block .test-stats span { display: flex; align-items: center; gap: 0.3rem; }
-
-.log-container { max-height: 400px; overflow-y: auto; background: #000; border: 1px solid var(--border); border-radius: 6px; padding: 0.75rem; font-family: var(--mono); font-size: 0.72rem; line-height: 1.5; }
-.log-container .log-line { white-space: pre; color: var(--text2); }
-.log-container .log-line.val { color: var(--green); font-weight: 500; }
-.log-container .log-line.iter { color: var(--blue); }
-.log-container .log-line.warn { color: var(--yellow); }
-
-.references { font-size: 0.82rem; color: var(--text2); }
-.references li { margin-bottom: 0.4rem; }
-
-.warning-box { background: rgba(248, 113, 113, 0.06); border: 1px solid rgba(248, 113, 113, 0.2); border-radius: 6px; padding: 1rem; margin-bottom: 1rem; }
-.warning-box .title { font-size: 0.7rem; font-weight: 600; color: var(--red); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.4rem; }
-
-.insight-box { background: rgba(96, 165, 250, 0.06); border: 1px solid rgba(96, 165, 250, 0.2); border-radius: 6px; padding: 1rem; margin-bottom: 1rem; }
-.insight-box .title { font-size: 0.7rem; font-weight: 600; color: var(--blue); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.4rem; }
-
-.toc { position: sticky; top: 1rem; min-width: 0; }
-.grid-2 > *, .grid-3 > * { min-width: 0; }
-.toc-grid { grid-template-columns: 220px 1fr; gap: 2rem; }
-.toc ol { list-style: none; margin: 0; }
-.toc li { padding: 0.25rem 0; font-size: 0.8rem; }
-.toc a { color: var(--text2); text-decoration: none; }
-.toc a:hover { color: var(--accent); }
-
-footer { border-top: 1px solid var(--border); padding-top: 1.5rem; margin-top: 2.5rem; font-size: 0.75rem; color: var(--text2); text-align: center; }
-
-@media (max-width: 768px) {
-  .paper-header h1 { font-size: 1.5rem; }
-}
-
-@media (max-width: 768px) {
-  .container { padding: 1.5rem 1rem; }
-  .toc-grid { grid-template-columns: 1fr; gap: 1.25rem; }
-  .toc { position: static; }
-  table { display: block; width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; white-space: nowrap; }
-  .card .value { font-size: 1.2rem; }
-  .paper-nav a { font-size: 0.7rem; padding: 0.28rem 0.55rem; }
-  .math-block { font-size: 0.78rem; padding: 0.65rem 0.75rem; }
-}
 </style>
 </head>
 <body>
@@ -179,11 +42,11 @@ footer { border-top: 1px solid var(--border); padding-top: 1.5rem; margin-top: 2
     <a href="#ssmscan">SSMScanFn</a>
     <a href="#experiments">Experiments</a>
     <a href="#vector">VECTOR</a>
-    <a href="moe.html" style="border-color: rgba(74, 222, 128, 0.3); color: var(--green);">MoE-Stream</a>
-    <a href="efficiency.html" style="border-color: rgba(34, 211, 238, 0.3); color: var(--cyan);">Efficiency</a>
+    <a href="moe.html">MoE-Stream</a>
+    <a href="efficiency.html">Efficiency</a>
     <a href="#testreport">Test Report</a>
     <a href="#references">References</a>
-    <a href="https://www.youtube.com/watch?v=-RFgsjmbkmg&t=26s" target="_blank" style="border-color: rgba(251, 146, 60, 0.3); color: var(--orange);">Video</a>
+    <a href="https://www.youtube.com/watch?v=-RFgsjmbkmg&t=26s" target="_blank" rel="noopener">Video</a>
   </nav>
 </header>
 
@@ -208,30 +71,17 @@ footer { border-top: 1px solid var(--border); padding-top: 1.5rem; margin-top: 2
 </div>
 <div style="min-width: 0;">
 
-<!-- What Changed -->
-<section id="whatchanged" class="what-changed">
-  <div class="kicker">What changed</div>
-  <div class="callout">
-    <div class="num">01</div>
-    <div>
-      <h3>We found the bottleneck</h3>
-      <p>The original scan implementation was dominated by autograd and kernel-launch overhead.</p>
-    </div>
-  </div>
-  <div class="callout">
-    <div class="num">02</div>
-    <div>
-      <h3>We measured it honestly</h3>
-      <p>After synchronized GPU timing, the claimed speedup dropped from 73× to approximately 5× end-to-end.</p>
-    </div>
-  </div>
-  <div class="callout">
-    <div class="num">03</div>
-    <div>
-      <h3>We fixed the architecture</h3>
-      <p>A fused Triton scan plus shape-conditional dispatch gives Stream genuinely linear scaling.</p>
-    </div>
-  </div>
+<!-- Changelog -->
+<section id="whatchanged" class="changelog" aria-label="Changelog">
+  <div class="kicker">Changelog</div>
+  <dl>
+    <dt>2026-07-28</dt>
+    <dd><strong>Fused Triton scan + shape-conditional dispatch.</strong> O(n) compute and memory validated on T4; crossover with GPT at T≈9k.</dd>
+    <dt>2026-07-23</dt>
+    <dd><strong>Synchronized GPU timing.</strong> End-to-end speedup revised from 73× (unsynchronized) to ~5× over the JIT loop.</dd>
+    <dt>2026-07-22</dt>
+    <dd><strong>SSMScanFn.</strong> Custom autograd scan replaces the O(T²) TorchScript backward graph; 10× faster backward, bit-exact.</dd>
+  </dl>
 </section>
 
 <!-- Abstract -->
@@ -330,13 +180,13 @@ Backward: dL/dh_T = 0
   <h2>4. VECTOR Architecture</h2>
   <p>VECTOR (Versatile Efficient Concept Transformer Optimized Runtime) extends Stream with three additional components: a learned position-pruning gate, local attention, and mixture-of-experts layers, all supervised by a five-term loss function.</p>
 
-  <h3>3.1 Saliency Gate</h3>
+  <h3>4.1 Saliency Gate</h3>
   <p>The gate learns to prune uninformative positions via a learned threshold θ:</p>
   <div class="math-block">s_t = mean_d(|x_t| · σ(θ))
 m_t = STE(s_t &gt; 0.5)</div>
   <p>where STE (straight-through estimator) uses hard thresholding in the forward pass but flows gradients through the soft score in the backward pass.</p>
 
-  <h3>3.2 Five-Term Dual Loss</h3>
+  <h3>4.2 Five-Term Dual Loss</h3>
   <div class="math-block">L = L_pred + α·L_recon + β·L_budget + γ·L_anchor + L_balance</div>
   <table>
     <thead><tr><th>Term</th><th>Purpose</th><th>Weight</th></tr></thead>
@@ -349,9 +199,9 @@ m_t = STE(s_t &gt; 0.5)</div>
     </tbody>
   </table>
 
-  <h3>3.3 Gate Collapse Analysis</h3>
-  <div class="warning-box">
-    <div class="title">Critical Finding</div>
+  <h3>4.3 Gate Collapse Analysis</h3>
+  <div class="callout bad">
+    <div class="title">Finding: gate collapse</div>
     <p>The SaliencyGate learns to keep all positions (active_ratio = 1.0) and never prunes. Three contributing factors identified: (1) zero pruning pressure during warmup, (2) hinge budget loss vanishes once T_eff ≤ C_target, removing gradient, (3) no countervailing force pushing atoms out.</p>
   </div>
 
@@ -392,10 +242,10 @@ m_t = STE(s_t &gt; 0.5)</div>
   <table>
     <thead><tr><th>Size</th><th>n_embd</th><th>n_layer</th><th>SSM State</th><th>Params</th><th>Val Loss</th><th>Throughput</th></tr></thead>
     <tbody>
-      <tr><td style="color:var(--accent);">XS</td><td>64</td><td>2</td><td>4</td><td>0.17M</td><td>3.97</td><td>108K tok/s</td></tr>
-      <tr><td style="color:var(--accent);">S</td><td>128</td><td>4</td><td>8</td><td>0.85M</td><td>2.97</td><td>45K tok/s</td></tr>
-      <tr><td style="color:var(--accent);">M</td><td>192</td><td>6</td><td>12</td><td>2.56M</td><td>2.48</td><td>27K tok/s</td></tr>
-      <tr><td style="color:var(--accent);">L</td><td>256</td><td>8</td><td>16</td><td>5.80M</td><td>2.16</td><td>12K tok/s</td></tr>
+      <tr><td>XS</td><td>64</td><td>2</td><td>4</td><td>0.17M</td><td>3.97</td><td>108K tok/s</td></tr>
+      <tr><td>S</td><td>128</td><td>4</td><td>8</td><td>0.85M</td><td>2.97</td><td>45K tok/s</td></tr>
+      <tr><td>M</td><td>192</td><td>6</td><td>12</td><td>2.56M</td><td>2.48</td><td>27K tok/s</td></tr>
+      <tr><td>L</td><td>256</td><td>8</td><td>16</td><td>5.80M</td><td>2.16</td><td>12K tok/s</td></tr>
     </tbody>
   </table>
   <div class="note">Power-law fit: val_loss ∝ params<sup>-0.156</sup>. GPU throughput scales inversely with model size as expected.</div>
@@ -408,26 +258,28 @@ m_t = STE(s_t &gt; 0.5)</div>
   <h3>5.3 GPU Benchmark (Colab T4): JIT vs Triton</h3>
   <p>Forward-pass wall-time on Tesla T4 (16GB). The fused Triton SSM kernel (single launch) replaces T individual Python-driven kernel launches. Stream params are constant regardless of T.</p>
 
-  <div class="insight-box" style="border-color:var(--green);">
-    <div class="title">Breakthrough: Crossover Confirmed at T≈9k</div>
+  <div class="callout good">
+    <div class="title">Result: crossover near T≈9k</div>
     <p>The fused Triton scan kernel delivers <strong>18.8× speedup</strong> over the JIT loop (93ms → 5ms per scan at T=4096) — <em>kernel-level only</em>: it measures fusing away Python-driven launch overhead, <em>not</em> end-to-end training time (see §5.4). At T=8192, Stream 4L/128D is within <strong>8% of GPT 3L/128D</strong> on forward-only wall-time. Crossover (O(n) vs O(n²)) is projected at T&gt;9000. The scan remains a serial loop (grid B×H), so a chunked two-level scan and a shape-conditional auto-dispatch rule were added for the occupancy-starved low-B·H regime — see §5.9 for the full arc.</p>
   </div>
 
+  <div class="table-scroll">
   <table>
     <thead><tr><th>T</th><th>B</th><th>S4 JIT (ms)</th><th>S4 Triton (ms)</th><th>Speedup</th><th>GPT3 (ms)</th><th>S6 JIT (ms)</th><th>S6 Triton (ms)</th><th>GPT8 (ms)</th></tr></thead>
     <tbody>
-      <tr><td>512</td><td>1</td><td>52.2</td><td style="color:var(--green);">4.1</td><td>12.8×</td><td>1.4</td><td>59.1</td><td style="color:var(--green);">10.7</td><td>4.7</td></tr>
-      <tr><td>1024</td><td>1</td><td>116.7</td><td style="color:var(--green);">6.1</td><td>19.2×</td><td>1.5</td><td>115.5</td><td style="color:var(--green);">20.6</td><td>6.0</td></tr>
-      <tr><td>2048</td><td>1</td><td>155.7</td><td style="color:var(--green);">9.2</td><td>17.0×</td><td>3.8</td><td>227.4</td><td style="color:var(--green);">41.1</td><td>14.2</td></tr>
-      <tr><td>4096</td><td>1</td><td>301.1</td><td style="color:var(--green);">18.1</td><td>16.6×</td><td>10.1</td><td>452.4</td><td style="color:var(--green);">82.2</td><td>42.3</td></tr>
-      <tr><td>8192</td><td>1</td><td>817.7</td><td style="color:var(--green);">36.4</td><td>22.5×</td><td>33.5</td><td>896.9</td><td style="color:var(--green);">165.3</td><td>137.1</td></tr>
-      <tr><td>512</td><td>4</td><td>39.6</td><td style="color:var(--green);">9.4</td><td>4.2×</td><td>2.6</td><td>60.6</td><td style="color:var(--green);">41.6</td><td>8.7</td></tr>
-      <tr><td>1024</td><td>4</td><td>75.9</td><td style="color:var(--green);">18.6</td><td>4.1×</td><td>4.8</td><td>178.3</td><td style="color:var(--green);">82.9</td><td>20.4</td></tr>
-      <tr><td>2048</td><td>4</td><td>148.5</td><td style="color:var(--green);">37.3</td><td>4.0×</td><td>12.4</td><td>232.9</td><td style="color:var(--green);">165.6</td><td>53.8</td></tr>
-      <tr><td>4096</td><td>4</td><td>418.7</td><td style="color:var(--green);">74.6</td><td>5.6×</td><td>37.6</td><td>551.2</td><td style="color:var(--green);">334.0</td><td>161.3</td></tr>
-      <tr><td>8192</td><td>4</td><td>608.2</td><td style="color:var(--green);">150.0</td><td>4.1×</td><td>127.1</td><td>1304.7</td><td style="color:var(--green);">680.4</td><td>541.6</td></tr>
+      <tr><td>512</td><td>1</td><td>52.2</td><td class="good">4.1</td><td>12.8×</td><td>1.4</td><td>59.1</td><td class="good">10.7</td><td>4.7</td></tr>
+      <tr><td>1024</td><td>1</td><td>116.7</td><td class="good">6.1</td><td>19.2×</td><td>1.5</td><td>115.5</td><td class="good">20.6</td><td>6.0</td></tr>
+      <tr><td>2048</td><td>1</td><td>155.7</td><td class="good">9.2</td><td>17.0×</td><td>3.8</td><td>227.4</td><td class="good">41.1</td><td>14.2</td></tr>
+      <tr><td>4096</td><td>1</td><td>301.1</td><td class="good">18.1</td><td>16.6×</td><td>10.1</td><td>452.4</td><td class="good">82.2</td><td>42.3</td></tr>
+      <tr><td>8192</td><td>1</td><td>817.7</td><td class="good">36.4</td><td>22.5×</td><td>33.5</td><td>896.9</td><td class="good">165.3</td><td>137.1</td></tr>
+      <tr><td>512</td><td>4</td><td>39.6</td><td class="good">9.4</td><td>4.2×</td><td>2.6</td><td>60.6</td><td class="good">41.6</td><td>8.7</td></tr>
+      <tr><td>1024</td><td>4</td><td>75.9</td><td class="good">18.6</td><td>4.1×</td><td>4.8</td><td>178.3</td><td class="good">82.9</td><td>20.4</td></tr>
+      <tr><td>2048</td><td>4</td><td>148.5</td><td class="good">37.3</td><td>4.0×</td><td>12.4</td><td>232.9</td><td class="good">165.6</td><td>53.8</td></tr>
+      <tr><td>4096</td><td>4</td><td>418.7</td><td class="good">74.6</td><td>5.6×</td><td>37.6</td><td>551.2</td><td class="good">334.0</td><td>161.3</td></tr>
+      <tr><td>8192</td><td>4</td><td>608.2</td><td class="good">150.0</td><td>4.1×</td><td>127.1</td><td>1304.7</td><td class="good">680.4</td><td>541.6</td></tr>
     </tbody>
   </table>
+  </div>
 
   <div class="grid-3">
     <div class="card">
@@ -470,17 +322,19 @@ m_t = STE(s_t &gt; 0.5)</div>
   <h3>5.5 Stream vs GPT: O(n) vs O(n²) — Full GPU Benchmark</h3>
   <p>Matched ~0.7M parameter models on Colab T4. Stream's throughput is <strong>flat at ~228K tok/s across all sequence lengths</strong> — perfect O(n) scaling. GPT peaks at T=1024 then decays quadratically.</p>
 
+  <div class="table-scroll">
   <table>
     <thead><tr><th>T</th><th>Stream 4L/128D</th><th>GPT 3L/128D</th><th>Stream Throughput</th><th>GPT Throughput</th><th>Advantage</th></tr></thead>
     <tbody>
-      <tr><td>512</td><td>4.0 ms</td><td>1.7 ms</td><td>126K tok/s</td><td>305K tok/s</td><td style="color:var(--red);">GPT 2.4×</td></tr>
-      <tr><td>1,024</td><td>7.0 ms</td><td>1.6 ms</td><td>146K tok/s</td><td>662K tok/s</td><td style="color:var(--red);">GPT 4.5×</td></tr>
-      <tr><td>2,048</td><td>8.9 ms</td><td>3.7 ms</td><td>230K tok/s</td><td>547K tok/s</td><td style="color:var(--red);">GPT 2.4×</td></tr>
-      <tr><td>4,096</td><td>17.8 ms</td><td>10.7 ms</td><td>231K tok/s</td><td>384K tok/s</td><td style="color:var(--red);">GPT 1.7×</td></tr>
+      <tr><td>512</td><td>4.0 ms</td><td>1.7 ms</td><td>126K tok/s</td><td>305K tok/s</td><td class="bad">GPT 2.4×</td></tr>
+      <tr><td>1,024</td><td>7.0 ms</td><td>1.6 ms</td><td>146K tok/s</td><td>662K tok/s</td><td class="bad">GPT 4.5×</td></tr>
+      <tr><td>2,048</td><td>8.9 ms</td><td>3.7 ms</td><td>230K tok/s</td><td>547K tok/s</td><td class="bad">GPT 2.4×</td></tr>
+      <tr><td>4,096</td><td>17.8 ms</td><td>10.7 ms</td><td>231K tok/s</td><td>384K tok/s</td><td class="bad">GPT 1.7×</td></tr>
       <tr><td>8,192</td><td>35.7 ms</td><td><strong>34.6 ms</strong></td><td>229K tok/s</td><td>237K tok/s</td><td><strong>≈ tied — crossover</strong></td></tr>
-      <tr><td>16,384</td><td><strong>71.8 ms</strong></td><td>124.3 ms</td><td><strong>228K tok/s</strong></td><td>132K tok/s</td><td style="color:var(--green);"><strong>Stream 1.73×</strong></td></tr>
+      <tr><td>16,384</td><td><strong>71.8 ms</strong></td><td>124.3 ms</td><td><strong>228K tok/s</strong></td><td>132K tok/s</td><td class="good"><strong>Stream 1.73×</strong></td></tr>
     </tbody>
   </table>
+  </div>
   <div class="note"><strong>Key finding:</strong> The O(n) vs O(n²) crossover is empirically validated at T≈9k on real GPU hardware (T4). Beyond T=16384, Stream's advantage grows linearly while GPT's disadvantage grows quadratically. At T=32768, Stream is projected to be ~3.5× faster.</div>
 
   <h3>5.6 Convergence: Byte-Level Stream vs Byte-Level GPT</h3>
@@ -490,18 +344,18 @@ m_t = STE(s_t &gt; 0.5)</div>
     <thead><tr><th>Iter</th><th>Stream Val</th><th>GPT Val</th><th>Gap</th><th>Leader</th></tr></thead>
     <tbody>
       <tr><td>250</td><td>2.58</td><td>2.34</td><td>+0.24</td><td>GPT</td></tr>
-      <tr><td>500</td><td><strong>2.28</strong></td><td>2.30</td><td><strong>-0.02</strong></td><td style="color:var(--green);">Stream</td></tr>
-      <tr><td>1,000</td><td><strong>2.09</strong></td><td>2.28</td><td><strong>-0.19</strong></td><td style="color:var(--green);">Stream</td></tr>
-      <tr><td>1,500</td><td><strong>2.02</strong></td><td>2.22</td><td><strong>-0.20</strong></td><td style="color:var(--green);">Stream</td></tr>
-      <tr><td>2,000</td><td><strong>1.95</strong></td><td>2.17</td><td><strong>-0.22</strong></td><td style="color:var(--green);">Stream</td></tr>
+      <tr><td>500</td><td><strong>2.28</strong></td><td>2.30</td><td><strong>-0.02</strong></td><td class="good">Stream</td></tr>
+      <tr><td>1,000</td><td><strong>2.09</strong></td><td>2.28</td><td><strong>-0.19</strong></td><td class="good">Stream</td></tr>
+      <tr><td>1,500</td><td><strong>2.02</strong></td><td>2.22</td><td><strong>-0.20</strong></td><td class="good">Stream</td></tr>
+      <tr><td>2,000</td><td><strong>1.95</strong></td><td>2.17</td><td><strong>-0.22</strong></td><td class="good">Stream</td></tr>
       <tr><td>3,000</td><td>1.91</td><td><strong>1.89</strong></td><td>+0.02</td><td>≈ tied</td></tr>
       <tr><td>3,750</td><td>1.82</td><td><strong>1.63</strong></td><td>+0.19</td><td>GPT</td></tr>
       <tr><td>5,000</td><td>1.86</td><td><strong>1.47</strong></td><td>+0.39</td><td>GPT</td></tr>
     </tbody>
   </table>
-  <div class="note"><strong>Key finding:</strong> Stream <strong>leads for the first ~2500 iterations</strong>, then GPT's attention overtakes at convergence. Stream predicts 4 future tokens (n_predict=4) — a harder task — and uses 26% fewer parameters (0.85M vs 1.15M) with zero position encoding. Despite these disadvantages, Stream is within 0.39 nats at 5000 iters. At T=65536, GPT cannot compete at all.</div>
+  <div class="note"><strong>Key finding:</strong> Stream <strong>leads for the first ~2500 iterations</strong>, then GPT's attention overtakes at convergence. Stream predicts 4 future tokens (n_predict=4) — a harder task — and uses 26% fewer parameters (0.85M vs 1.15M) with zero position encoding. Despite these disadvantages, Stream is within 0.39 nats at 5000 iters. At T=65536, GPT is projected to be uncompetitive on this hardware (O(n²) memory).</div>
 
-  <h3>5.7 Memory Scaling: Perfect O(n)</h3>
+  <div class="figure-container">
     <img src="paper/figures/fig5_loss_curves.png" alt="Training Loss Curves">
     <div class="caption"><strong>Figure 5:</strong> Training loss dynamics for Stream 4L/128D on Colab T4 (T=4096, B=4, 500 iters). Real training data showing steady convergence to 2.36 validation loss. GPT converged references shown as horizontal lines.</div>
   </div>
@@ -511,7 +365,7 @@ m_t = STE(s_t &gt; 0.5)</div>
     <div class="caption"><strong>Figure 6:</strong> Asymptotic complexity comparison: Stream's O(T) SSM scan vs Transformer's O(T<sup>2</sup>) attention. Measured GPU slopes annotated: Stream confirms O(T), GPT shows O(T^1.43) at 192D width.</div>
   </div>
 
-  <h3>5.6 Memory Scaling: Perfect O(n)</h3>
+  <h3>5.7 Memory Scaling: O(n) Memory</h3>
   <p>Stream 4L/128D training (fwd+bwd) measured on Colab T4 (15 GB usable). Every doubling of sequence length doubles memory — exact O(n) proportionality.</p>
 
   <table>
@@ -531,9 +385,9 @@ m_t = STE(s_t &gt; 0.5)</div>
   <table>
     <thead><tr><th>Config</th><th>Params</th><th>Val Loss</th><th>Replaced</th><th>Notes</th></tr></thead>
     <tbody>
-      <tr><td>Replacement OFF</td><td>~2.95M</td><td style="color:var(--green);">2.19</td><td>0</td><td>Baseline — all experts survive</td></tr>
-      <tr><td>Replacement ON (original)</td><td>~2.95M</td><td style="color:var(--red);">2.35</td><td>~2-4/check</td><td>Gradient impact too noisy — false kills</td></tr>
-      <tr><td>Replacement TUNED</td><td>~2.95M</td><td style="color:var(--green);">2.19</td><td>0</td><td>Strict threshold — effectively OFF</td></tr>
+      <tr><td>Replacement OFF</td><td>~2.95M</td><td class="good">2.19</td><td>0</td><td>Baseline — all experts survive</td></tr>
+      <tr><td>Replacement ON (original)</td><td>~2.95M</td><td class="bad">2.35</td><td>~2-4/check</td><td>Gradient impact too noisy — false kills</td></tr>
+      <tr><td>Replacement TUNED</td><td>~2.95M</td><td class="good">2.19</td><td>0</td><td>Strict threshold — effectively OFF</td></tr>
     </tbody>
   </table>
   <div class="note"><strong>Finding:</strong> Gradient-based expert impact is too noisy in early layers. Replacement kills experts during training transients. Fix requires redesigned impact measurement (pooled over more steps).</div>
@@ -543,7 +397,10 @@ m_t = STE(s_t &gt; 0.5)</div>
     <div class="caption"><strong>Figure 10:</strong> Summary of all experimental results. Stream models from Colab T4 GPU training and scaling runs; nanoGPT baselines from converged CPU runs.</div>
   </div>
 
-  <h3>5.9 Triton Scan Development Arc: From Fake Parallelism to a Measured Dispatch Rule</h3>
+  <h3>5.9 Triton Scan Development Arc</h3>
+  <details class="deep">
+    <summary>From fake parallelism to a measured dispatch rule</summary>
+    <div class="deep-body">
   <p>How the Triton SSM scan went from a nominal speedup to a benchmarked, shape-conditional kernel. Every threshold below is backed by measured T4 data rather than guesses.</p>
   <ol>
     <li><strong>Found two fake-parallelism bugs before writing any new code.</strong> The "fused Triton scan" wasn't actually parallel — <code>grid=(B,H)</code> only, with a sequential Python-loop chain of T dependent FMAs inside each program. Separately, earlier "12ms/iter" logs were fake because the training loop had no <code>torch.cuda.synchronize()</code>, so it was measuring CPU scheduling time, not GPU completion time. Honest timing (with sync) was added first.</li>
@@ -557,6 +414,8 @@ m_t = STE(s_t &gt; 0.5)</div>
     <li><strong>Ran disambiguation and boundary-pinning experiments to find the real rule</strong>, rather than re-guessing. Confirmed the right predictor is the product <strong>B·H</strong> (not batch size alone — verified by testing two different B/H splits with the same product and getting matching results), found no real sequence-length floor exists (wins held even at T=4096), and pinned the actual ceiling to <strong>B·H≤128</strong> (128 wins, 192 loses).</li>
     <li><strong>Shipped the corrected rule</strong>: <code>auto_scan_path</code> now picks chunked when <code>B·H≤128</code>, fused otherwise, with no T threshold — fully backed by measured data rather than interpolated guesses, with the fallback chain (chunked→fused→non-fused) still intact for safety.</li>
   </ol>
+    </div>
+  </details>
   <div class="note"><strong>Result:</strong> B·H=128 chunked wins 1.15–1.24x over fused at every T from 4096 to 65536; B·H=192 loses (0.96–0.97x). The shipped rule needs no further probing.</div>
 
   <h3>5.10 Muon Optimizer (Keller Jordan) — Validated on Colab T4</h3>
@@ -583,43 +442,33 @@ m_t = STE(s_t &gt; 0.5)</div>
     <thead><tr><th>step</th><th>AdamW loss</th><th>Muon loss</th></tr></thead>
     <tbody>
       <tr><td>1</td><td>5.5658</td><td>5.5658</td></tr>
-      <tr><td>51</td><td>3.9486</td><td style="color:var(--green);">1.2919</td></tr>
-      <tr><td>101</td><td>2.1446</td><td style="color:var(--green);">0.0061</td></tr>
-      <tr><td>151</td><td>0.3933</td><td style="color:var(--green);">0.0005</td></tr>
-      <tr><td>201</td><td>0.0570</td><td style="color:var(--green);">0.0060</td></tr>
-      <tr><td>251</td><td>0.0137</td><td style="color:var(--green);">0.0001</td></tr>
+      <tr><td>51</td><td>3.9486</td><td class="good">1.2919</td></tr>
+      <tr><td>101</td><td>2.1446</td><td class="good">0.0061</td></tr>
+      <tr><td>151</td><td>0.3933</td><td class="good">0.0005</td></tr>
+      <tr><td>201</td><td>0.0570</td><td class="good">0.0060</td></tr>
+      <tr><td>251</td><td>0.0137</td><td class="good">0.0001</td></tr>
     </tbody>
   </table>
   <div class="note"><strong>Matched wall-clock (300 AdamW steps at median):</strong> Muon gets ~243 steps and reaches loss <strong>0.0001</strong> vs AdamW <strong>0.0040</strong> at 300 — Muon converges far faster on this scale despite the 1.2× per-step cost.</div>
 
-  <div class="note" style="border-color:var(--orange);"><strong>Caveats (read before citing):</strong> (1) This is a <strong>toy/sanity scale</strong> — 4L/128D on a tiny/synthetic byte task; a loss of ~0.0001 means the task is nearly memorized, and says nothing about production-scale convergence. (2) Muon's per-step cost is ~1.2× AdamW's (median), not free. (3) NS is deliberately bf16 and approximate; the validation asserts it stays a near-unitary preconditioner, not that it is exactly orthogonal.</div>
+  <div class="callout warn">
+    <div class="title">Caveats — read before citing</div>
+    <p>(1) This is a <strong>toy/sanity scale</strong> — 4L/128D on a tiny/synthetic byte task; a loss of ~0.0001 means the task is nearly memorized, and says nothing about production-scale convergence. (2) Muon's per-step cost is ~1.2× AdamW's (median), not free. (3) NS is deliberately bf16 and approximate; the validation asserts it stays a near-unitary preconditioner, not that it is exactly orthogonal.</p>
+  </div>
 
   <h3>5.11 Sparse-Retrieval Layers vs GPT (A/B — results pending)</h3>
   <p><strong>Why this is the central experiment.</strong> Stream is already O(n) (the forced win at long context), but at matched small scale GPT beats Stream by ~0.49 nat. The hypothesis: a fixed <code>d_state=16</code> recurrence cannot do <em>content-based recall</em> — it compresses history, it cannot go back and find "the name from 1,000 bytes ago" like attention can. So we add retrieval <em>selectively</em>: most layers stay SSM (O(n)), and one sparse-retrieval block provides exact local + anchored global recall.</p>
   <p><strong>Design (<code>RetrievalBlock</code>, in <code>VECTOR/model.py</code>):</strong> each query attends to the last <code>window=128</code> positions (causal sliding window via left-padded <code>unfold</code> — no O(n²) matrix) plus 16 learned <strong>global</strong> key/value tokens (sink-style static memory; content-derived global tokens are the v2 upgrade). Position information is a learned <em>relative-position bias</em>, so the model stays position-free like the SSM it sits on. Memory stays O(n). Off by default (<code>StreamConfig(n_retrieval=0)</code>); the block replaces the last SSM block when enabled. The retrieval <code>proj</code> is square, so it lands on Muon's 14-step square-NS path automatically.</p>
   <p><strong>CELL 13 A/B</strong> trains three models on <strong>identical</strong> batches (precomputed once, shared), same LR schedule, same steps: <code>Stream-4L</code> (4 SSM), <code>StreamR-4L</code> (3 SSM + 1 retrieval), and <code>GPT-3L</code> (Transformer with RoPE — position-free, so it cannot hide behind an absolute-PE memory crutch). Two legs: <strong>T=4096</strong> (quality) and <strong>T=16384</strong> (long context — val loss + per-step median timing; GPT is O(n²) and is expected to slow down hard, which is the point). All three models run under the same settings for a fair comparison.</p>
   <p><strong>Efficiency stack (CELL 13 v2):</strong> every Stream/StreamR model runs on the <strong>Triton auto-scan</strong> (shape-conditional fused/chunked, benchmarked 1.2–5× faster than JIT in §5.3/§5.4) via <code>enable_triton(model, auto=True)</code>, and <strong>all</strong> models train in <strong>fp16 autocast + GradScaler</strong> (native T4 tensor cores). Toggles: <code>USE_TRITON</code>, <code>USE_FP16</code> at the top of the cell — flip <code>USE_FP16=False</code> if any NaN appears. <em>Validated the hard way:</em> fp16 exposed a real bug in two Triton backward kernels (an <code>if t>0 / else: fp32 zeros</code> pattern that mismatched the fp16 loaded <code>h_prev</code>); fixed with a masked load so the dtype always matches, and CELL 13 now detects a stale local <code>triton_scan.py</code> and warns/falls back instead of crashing.</p>
-  <div class="card">
-    <div class="card-title">A/B: final val loss (lower is better)</div>
-    <table>
-      <thead><tr><th>Leg</th><th>Stream-4L</th><th>StreamR-4L</th><th>GPT-3L</th><th>Retrieval helps?</th><th>Gap closed vs GPT</th></tr></thead>
-      <tbody>
-        <tr><td>T=4096</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
-        <tr><td>T=16384</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
-      </tbody>
-    </table>
+  <div class="pending">
+    <span class="status-badge pending">PENDING</span>
+    <p>Results table goes here once CELL 13 finishes: final val loss and per-step medians for Stream-4L vs StreamR-4L vs GPT-3L at T=4096 and T=16384.</p>
   </div>
-  <div class="card">
-    <div class="card-title">A/B: per-step median (ms, synchronized)</div>
-    <table>
-      <thead><tr><th>Leg</th><th>Stream-4L</th><th>StreamR-4L</th><th>GPT-3L</th><th>StreamR faster than GPT?</th></tr></thead>
-      <tbody>
-        <tr><td>T=4096</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
-        <tr><td>T=16384</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
-      </tbody>
-    </table>
+  <div class="callout warn">
+    <div class="title">Scope note</div>
+    <p>v1 global tokens are <em>static</em> memory, not content-derived — they cannot by themselves retrieve arbitrary long-range facts (next iteration: chunk-derived global keys/values). A partial gap close is a win for the direction, not a claim of GPT parity. The GPT T=16384 leg is slow by construction; if it overruns, interrupt and report the timing that did complete.</p>
   </div>
-  <div class="note" style="border-color:var(--orange);"><strong>Honesty box:</strong> v1 global tokens are <em>static</em> memory, not content-derived — they cannot by themselves retrieve arbitrary long-range facts (that is the next iteration: chunk-derived global keys/values). A partial gap close is a win for the direction, not a claim of GPT parity. The GPT T=16384 leg is slow by construction; if it overruns, interrupt and report the timing that did complete.</div>
 </section>
 
 <!-- MoE-Stream Link -->
@@ -627,10 +476,8 @@ m_t = STE(s_t &gt; 0.5)</div>
   <h2>6. MoE-Stream</h2>
   <p>MoE-Stream augments Stream with sparse mixture-of-experts feed-forward layers and gradient-aware expert lifecycle management. Each expert tracks impact-to-frequency value scores to distinguish rare-but-valuable specialists from truly dead experts. Expert replacement clones the best expert with noise rather than random initialization.</p>
   <p><strong>Current status:</strong> Expert replacement is disabled by default. Gradient-based impact measurements are too noisy in early layers, causing false "dead" classifications that hurt validation loss (2.35 with replacement vs 2.19 without). The tuned config with strict thresholds effectively disables replacement.</p>
-  <div style="text-align: center; margin: 1.5rem 0;">
-    <a href="moe.html" style="display: inline-block; padding: 0.7rem 1.5rem; background: var(--surface); border: 1px solid rgba(74, 222, 128, 0.3); border-radius: 6px; color: var(--green); text-decoration: none; font-weight: 500; transition: all 0.15s;" onmouseover="this.style.borderColor='var(--green)'" onmouseout="this.style.borderColor='rgba(74, 222, 128, 0.3)'">
-      &#8594; View Full MoE-Stream Report &rsaquo;
-    </a>
+  <div class="page-link">
+    <a href="moe.html"><span class="arrow">&rarr;</span>Full MoE-Stream report</a>
   </div>
 </section>
 
@@ -648,8 +495,8 @@ m_t = STE(s_t &gt; 0.5)</div>
   <p>The gate collapse has a specific fixable cause: the loss landscape creates an equilibrium at "keep everything." The hinge budget loss provides no gradient once T_eff ≤ C_target, while L_pred's gradient always favors keeping more information. A two-sided penalty (e.g., (T_eff - C_target)²) or entropy bonus should break this equilibrium.</p>
 
   <h3>7.4 Honest Assessment</h3>
-  <div class="insight-box">
-    <div class="title">Key Takeaways</div>
+  <div class="callout">
+    <div class="title">Takeaways</div>
     <ol>
       <li><strong>Stream validates that token-free byte-level SSM language modeling converges</strong> — confirmed on GPU (Colab T4)</li>
       <li><strong>The Transformer still wins on loss at matched parameter counts</strong> — Stream's value is O(n) complexity, not superior loss at small scale</li>
@@ -701,7 +548,7 @@ m_t = STE(s_t &gt; 0.5)</div>
 <div class="log-line iter">iter 100: loss 6.7711, time 2429.06ms, T_eff=236.0, cr=0.92</div>
 <div class="log-line iter">iter 120: loss 5.9707, time 1553.80ms, T_eff=254.0, cr=0.99</div>
 <div class="log-line iter">iter 150: loss 5.7049, time 1866.39ms, T_eff=256.0, cr=1.00</div>
-<div class="log-line val" style="color:var(--yellow);">iter 200: loss 6.1484, time 655.48ms, T_eff=253.0, cr=0.99</div>
+<div class="log-line warn">iter 200: loss 6.1484, time 655.48ms, T_eff=253.0, cr=0.99</div>
         </div>
       </div>
     </div>
@@ -740,7 +587,7 @@ m_t = STE(s_t &gt; 0.5)</div>
 <div class="log-line iter">iter 125: loss 6.2778, time 648.50ms, T_eff=256.0, cr=1.00</div>
 <div class="log-line iter">iter 150: loss 6.1041, time 614.88ms, T_eff=256.0, cr=1.00</div>
 <div class="log-line iter">iter 175: loss 6.8282, time 672.79ms, T_eff=256.0, cr=1.00</div>
-<div class="log-line val" style="color:var(--green);">iter 200: loss 6.2029, time 652.42ms, T_eff=256.0, cr=1.00</div>
+<div class="log-line val">iter 200: loss 6.2029, time 652.42ms, T_eff=256.0, cr=1.00</div>
         </div>
       </div>
     </div>
@@ -788,5 +635,6 @@ m_t = STE(s_t &gt; 0.5)</div>
 </footer>
 
 </div>
+<script src="assets/site.js"></script>
 </body>
 </html>

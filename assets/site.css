@@ -1,0 +1,260 @@
+/* RETRANS-X research site — shared stylesheet.
+   One palette, one type scale, one callout system. No per-page rainbows. */
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg: #0a0a0b;
+  --surface: #121214;
+  --surface2: #1a1a1e;
+  --border: #232328;
+  --text: #e4e4e7;
+  --muted: #9c9ca6;
+  --faint: #63636c;
+  --accent: #fafafa;
+  --good: #34d399;
+  --bad: #f87171;
+  --warn: #fbbf24;
+  --info: #60a5fa;
+  --serif: 'Source Serif 4', Georgia, Cambria, 'Times New Roman', serif;
+  --sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --mono: 'JetBrains Mono', 'Cascadia Code', Consolas, monospace;
+}
+
+html { scroll-behavior: smooth; }
+body {
+  font-family: var(--serif);
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.7;
+  -webkit-font-smoothing: antialiased;
+}
+h1, h2, h3, h4 { font-family: var(--sans); }
+code, .math, .math-block { font-family: var(--mono); }
+
+.container { max-width: 1100px; margin: 0 auto; padding: 2rem 1.5rem 3rem; }
+
+/* ---------- masthead ---------- */
+.masthead {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 1rem;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 1.25rem; margin-bottom: 1.5rem;
+}
+.masthead .identity .lab {
+  font-family: var(--sans); font-size: 1rem; font-weight: 700;
+  letter-spacing: 0.18em; text-transform: uppercase;
+}
+.masthead .identity .note {
+  font-size: 0.7rem; letter-spacing: 0.14em; text-transform: uppercase;
+  color: var(--muted); margin-top: 0.15rem;
+}
+.masthead .headline { text-align: center; flex: 1; padding: 0 1.5rem; }
+.masthead .headline h1 {
+  font-size: 2.1rem; font-weight: 600; letter-spacing: -0.02em; line-height: 1.25;
+  margin-bottom: 0.4rem;
+}
+.masthead .headline .sub {
+  font-size: 0.78rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted);
+}
+.masthead .colophon { font-family: var(--sans); text-align: right; font-size: 0.78rem; line-height: 1.5; }
+.masthead .colophon .line { color: var(--muted); }
+.masthead .colophon .line.strong { color: var(--accent); font-weight: 500; }
+
+/* ---------- page nav ---------- */
+.paper-header { margin-bottom: 2rem; text-align: center; }
+.paper-header .authors { font-size: 0.95rem; color: var(--muted); margin-bottom: 0.5rem; }
+.paper-header .affiliation, .paper-header .date { font-size: 0.8rem; color: var(--muted); margin-bottom: 0.5rem; }
+.paper-nav { display: flex; gap: 0.5rem; justify-content: center; flex-wrap: wrap; margin-top: 1.25rem; }
+.paper-nav a {
+  color: var(--muted); text-decoration: none; font-size: 0.75rem; font-family: var(--sans);
+  padding: 0.3rem 0.75rem; border: 1px solid var(--border); border-radius: 4px;
+  transition: color 0.15s, border-color 0.15s;
+}
+.paper-nav a:hover { color: var(--accent); border-color: var(--muted); }
+.paper-nav a[aria-current="page"] { color: var(--accent); border-color: var(--accent); }
+
+/* ---------- layout with TOC ---------- */
+.toc-grid { display: grid; grid-template-columns: 220px 1fr; gap: 2rem; }
+.toc { position: sticky; top: 1rem; align-self: start; min-width: 0; }
+.toc ol { list-style: none; margin: 0; }
+.toc li { padding: 0.25rem 0; font-size: 0.8rem; }
+.toc a { color: var(--muted); text-decoration: none; }
+.toc a:hover, .toc a.active { color: var(--accent); }
+
+/* ---------- sections ---------- */
+.section { margin-bottom: 2.5rem; }
+.section h2 {
+  font-size: 1.3rem; font-weight: 600; letter-spacing: -0.01em;
+  margin-bottom: 1rem; padding-bottom: 0.4rem; border-bottom: 1px solid var(--border);
+}
+.section h3 { font-size: 1.02rem; font-weight: 600; margin: 1.25rem 0 0.6rem; }
+.section p { font-size: 0.92rem; margin-bottom: 0.75rem; line-height: 1.75; }
+.note { font-size: 0.82rem; color: var(--muted); margin-bottom: 0.75rem; }
+.note strong { color: var(--text); font-weight: 600; }
+
+ul, ol { margin: 0.5rem 0 0.75rem 1.5rem; }
+li { font-size: 0.9rem; margin-bottom: 0.3rem; }
+
+/* ---------- changelog strip (was "what changed" marketing) ---------- */
+.changelog {
+  border: 1px solid var(--border); border-radius: 8px;
+  padding: 1.25rem 1.5rem; margin-bottom: 2.5rem; background: var(--surface);
+}
+.changelog .kicker {
+  font-family: var(--sans); font-size: 0.68rem; font-weight: 600;
+  letter-spacing: 0.16em; text-transform: uppercase; color: var(--muted);
+  margin-bottom: 0.75rem;
+}
+.changelog dl { display: grid; grid-template-columns: auto 1fr; gap: 0.4rem 1rem; margin: 0; }
+.changelog dt { font-family: var(--mono); font-size: 0.78rem; color: var(--faint); white-space: nowrap; }
+.changelog dd { font-size: 0.87rem; margin: 0; }
+.changelog dd strong { font-weight: 600; }
+
+/* ---------- figures ---------- */
+.figure-container, figure.block {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+  padding: 1rem; margin: 1.25rem 0; text-align: center; overflow: hidden;
+}
+.figure-container img, figure.block img { max-width: 100%; height: auto; border-radius: 4px; display: block; margin: 0 auto; }
+.figure-container .caption, figure.block figcaption { font-size: 0.8rem; color: var(--muted); margin-top: 0.6rem; text-align: left; }
+
+/* ---------- math ---------- */
+.math { font-size: 0.85em; color: var(--text); background: var(--surface2); padding: 0.1rem 0.3rem; border-radius: 3px; }
+.math-block {
+  font-size: 0.82rem; background: var(--surface2); color: var(--text);
+  padding: 0.75rem 1rem; border-radius: 6px; margin: 0.75rem 0;
+  overflow-x: auto; white-space: pre; border: 1px solid var(--border); line-height: 1.6;
+}
+
+/* ---------- cards & grids ---------- */
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; margin-bottom: 1.5rem; }
+.grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1.25rem; margin-bottom: 1.5rem; }
+.grid-2 > *, .grid-3 > * { min-width: 0; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.25rem; margin-bottom: 1rem; min-width: 0; }
+.card .card-title {
+  font-family: var(--sans); font-size: 0.7rem; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.08em; color: var(--muted); margin-bottom: 0.5rem;
+}
+.card .value { font-family: var(--sans); font-size: 1.4rem; font-weight: 300; margin: 0.15rem 0; }
+.card .value.small { font-size: 1rem; }
+
+/* ---------- tables ---------- */
+.table-scroll { overflow-x: auto; margin-bottom: 1rem; border: 1px solid var(--border); border-radius: 8px; }
+.table-scroll table { margin-bottom: 0; border: none; }
+table { width: 100%; border-collapse: collapse; margin-bottom: 1rem; font-variant-numeric: tabular-nums; }
+th {
+  text-align: left; font-family: var(--sans); font-size: 0.7rem; font-weight: 500;
+  text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted);
+  padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border);
+  background: var(--surface); white-space: nowrap;
+}
+td { padding: 0.45rem 0.75rem; border-bottom: 1px solid var(--border); font-size: 0.82rem; white-space: nowrap; }
+td.wrap, th.wrap { white-space: normal; }
+tbody tr:last-child td { border-bottom: none; }
+tbody tr:hover td { background: rgba(255, 255, 255, 0.02); }
+td .pos { color: var(--good); font-weight: 600; }
+td .neg { color: var(--bad); }
+td.good { color: var(--good); font-weight: 600; }
+td.bad { color: var(--bad); }
+
+/* ---------- callouts: one system, three flavors ---------- */
+.callout { border: 1px solid var(--border); border-left: 3px solid var(--info); border-radius: 6px; padding: 1rem; margin-bottom: 1rem; background: var(--surface); }
+.callout .title {
+  font-family: var(--sans); font-size: 0.7rem; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.4rem; color: var(--info);
+}
+.callout p, .callout li { font-size: 0.87rem; }
+.callout p:last-child { margin-bottom: 0; }
+.callout.warn { border-left-color: var(--warn); }
+.callout.warn .title { color: var(--warn); }
+.callout.bad { border-left-color: var(--bad); }
+.callout.bad .title { color: var(--bad); }
+.callout.good { border-left-color: var(--good); }
+.callout.good .title { color: var(--good); }
+
+/* ---------- status badges ---------- */
+.status-badge {
+  display: inline-block; font-size: 0.6rem; font-weight: 600; letter-spacing: 0.03em;
+  padding: 0.15rem 0.45rem; border-radius: 3px; border: 1px solid;
+}
+.status-badge.pass { background: rgba(52, 211, 153, 0.12); color: var(--good); border-color: rgba(52, 211, 153, 0.3); }
+.status-badge.warn { background: rgba(251, 191, 36, 0.12); color: var(--warn); border-color: rgba(251, 191, 36, 0.3); }
+.status-badge.fail { background: rgba(248, 113, 113, 0.12); color: var(--bad); border-color: rgba(248, 113, 113, 0.3); }
+.status-badge.pending { background: rgba(96, 165, 250, 0.12); color: var(--info); border-color: rgba(96, 165, 250, 0.3); }
+
+/* ---------- test report ---------- */
+.test-block { background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; padding: 0.75rem; margin-bottom: 0.75rem; }
+.test-block .test-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.4rem; gap: 0.5rem; }
+.test-block .test-name { font-size: 0.85rem; font-weight: 500; }
+.test-block .test-meta { font-size: 0.7rem; color: var(--muted); }
+.test-block .test-stats { display: flex; gap: 1.5rem; flex-wrap: wrap; font-size: 0.8rem; color: var(--muted); margin-top: 0.35rem; }
+.log-container {
+  max-height: 400px; overflow-y: auto; background: #000;
+  border: 1px solid var(--border); border-radius: 6px; padding: 0.75rem;
+  font-family: var(--mono); font-size: 0.72rem; line-height: 1.5;
+}
+.log-container .log-line { white-space: pre; color: var(--muted); }
+.log-container .log-line.val { color: var(--good); font-weight: 500; }
+.log-container .log-line.iter { color: var(--info); }
+.log-container .log-line.warn { color: var(--warn); }
+
+/* ---------- collapsible deep-dives ---------- */
+details.deep { border: 1px solid var(--border); border-radius: 8px; background: var(--surface); margin-bottom: 1rem; }
+details.deep summary {
+  cursor: pointer; font-family: var(--sans); font-size: 0.95rem; font-weight: 600;
+  padding: 0.9rem 1.1rem; list-style: none;
+}
+details.deep summary::-webkit-details-marker { display: none; }
+details.deep summary::before { content: "+"; color: var(--muted); margin-right: 0.6rem; font-family: var(--mono); }
+details.deep[open] summary::before { content: "–"; }
+details.deep .deep-body { padding: 0 1.1rem 1.1rem; }
+details.deep .deep-body ol { margin-top: 0; }
+
+/* ---------- pending placeholder (replaces tables of dashes) ---------- */
+.pending {
+  border: 1px dashed var(--faint); border-radius: 8px; padding: 1.25rem;
+  margin-bottom: 1rem; text-align: center; color: var(--muted); font-size: 0.87rem;
+}
+.pending .status-badge { margin-bottom: 0.5rem; }
+
+/* ---------- cross-page link cards ---------- */
+.page-link { text-align: center; margin: 1.5rem 0; }
+.page-link a {
+  display: inline-block; padding: 0.7rem 1.5rem; background: var(--surface);
+  border: 1px solid var(--border); border-radius: 6px;
+  color: var(--accent); text-decoration: none; font-family: var(--sans); font-weight: 500;
+  transition: border-color 0.15s;
+}
+.page-link a:hover { border-color: var(--muted); }
+.page-link a .arrow { color: var(--muted); margin-right: 0.4rem; }
+
+.references { font-size: 0.82rem; color: var(--muted); }
+.references li { margin-bottom: 0.4rem; }
+
+footer {
+  border-top: 1px solid var(--border); padding-top: 1.5rem; margin-top: 2.5rem;
+  font-size: 0.75rem; color: var(--muted); text-align: center; font-family: var(--sans);
+}
+footer a { color: var(--muted); }
+footer a:hover { color: var(--accent); }
+
+@media (max-width: 860px) {
+  .toc-grid { grid-template-columns: 1fr; gap: 1.25rem; }
+  .toc { position: static; }
+  .toc .card { padding: 0.75rem; }
+  .toc ol { display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; }
+}
+
+@media (max-width: 768px) {
+  .container { padding: 1.5rem 1rem 2.5rem; }
+  .masthead { flex-direction: column; align-items: center; gap: 1rem; text-align: center; }
+  .masthead .identity, .masthead .colophon { text-align: center; }
+  .masthead .headline { padding: 0; }
+  .masthead .headline h1 { font-size: 1.6rem; }
+  .grid-2, .grid-3 { grid-template-columns: 1fr; }
+  .card .value { font-size: 1.2rem; }
+  .paper-nav a { font-size: 0.7rem; padding: 0.28rem 0.55rem; }
+  .math-block { font-size: 0.78rem; padding: 0.65rem 0.75rem; }
+  .changelog dl { grid-template-columns: 1fr; gap: 0.15rem; }
+  .changelog dt { margin-top: 0.5rem; }
+}
