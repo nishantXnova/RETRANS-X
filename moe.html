@@ -6,107 +6,20 @@
 <title>MoE-Stream: Sparse Mixture of Experts with Gradient-Aware Expert Lifecycle</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Source+Serif+4:ital,wght@0,400;0,600;1,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/site.css">
 <style>
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-:root {
-  --bg: #0a0a0a;
-  --surface: #111111;
-  --surface2: #1a1a1a;
-  --border: #222222;
-  --text: #e0e0e0;
-  --text2: #888888;
-  --accent: #ffffff;
-  --green: #4ade80;
-  --yellow: #facc15;
-  --red: #f87171;
-  --blue: #60a5fa;
-  --purple: #a78bfa;
-  --orange: #fb923c;
-  --cyan: #22d3ee;
-  --font: 'Source Serif 4', Georgia, Cambria, 'Times New Roman', serif;
-  --head: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-  --mono: 'JetBrains Mono', monospace;
-}
-body { font-family: var(--font); background: var(--bg); color: var(--text); line-height: 1.7; -webkit-font-smoothing: antialiased; }
-h1, h2, h3, h4 { font-family: var(--head); }
-.container { max-width: 1100px; margin: 0 auto; padding: 2rem 1.5rem; }
-
-/* Header */
+/* Page-specific: header, code blocks, expert log lines, flow diagram. Rest in assets/site.css. */
+.container { max-width: 1100px; }
 .moe-header { border-bottom: 1px solid var(--border); padding-bottom: 2rem; margin-bottom: 2rem; text-align: center; }
-.moe-header .badge { display: inline-block; font-size: 0.65rem; padding: 0.2rem 0.6rem; border-radius: 3px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; margin-bottom: 1rem; background: rgba(74, 222, 128, 0.15); color: var(--green); border: 1px solid rgba(74, 222, 128, 0.3); }
-.moe-header h1 { font-size: 2rem; font-weight: 600; letter-spacing: -0.03em; color: var(--accent); line-height: 1.3; margin-bottom: 0.75rem; }
-.moe-header .subtitle { font-size: 0.95rem; color: var(--text2); margin-bottom: 0.5rem; }
-.moe-header .back-link { display: inline-block; margin-top: 1rem; padding: 0.5rem 1rem; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; color: var(--text2); text-decoration: none; font-size: 0.85rem; transition: all 0.15s; }
-.moe-header .back-link:hover { color: var(--accent); border-color: var(--accent); }
-
-.section { margin-bottom: 2.5rem; }
-.section h2 { font-size: 1.35rem; font-weight: 600; color: var(--accent); margin-bottom: 1rem; padding-bottom: 0.4rem; border-bottom: 1px solid var(--border); }
-.section h3 { font-size: 1.05rem; font-weight: 600; color: var(--accent); margin: 1.25rem 0 0.6rem; }
-.section p { font-size: 0.92rem; color: var(--text); margin-bottom: 0.75rem; line-height: 1.75; }
-.section .note { font-size: 0.82rem; color: var(--text2); margin-bottom: 0.75rem; }
-
-.math-block { font-family: var(--mono); font-size: 0.85rem; color: var(--cyan); background: var(--surface2); padding: 0.75rem 1rem; border-radius: 6px; margin: 0.75rem 0; overflow-x: auto; white-space: pre; border: 1px solid var(--border); }
-
-.card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.25rem; margin-bottom: 1rem; }
-.card .card-title { font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text2); margin-bottom: 0.5rem; }
-.card .value { font-size: 1.4rem; font-weight: 300; color: var(--accent); margin: 0.15rem 0; }
-
-.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; margin-bottom: 1.5rem; }
-.grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1.25rem; margin-bottom: 1.5rem; }
-@media (max-width: 768px) { .grid-2, .grid-3 { grid-template-columns: 1fr; } }
-
-table { width: 100%; border-collapse: collapse; margin-bottom: 1rem; }
-th { text-align: left; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text2); padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border); font-weight: 500; }
-td { padding: 0.45rem 0.75rem; border-bottom: 1px solid var(--border); font-size: 0.82rem; }
-
-.status-badge { display: inline-block; font-size: 0.6rem; padding: 0.15rem 0.45rem; border-radius: 3px; font-weight: 600; letter-spacing: 0.03em; }
-.status-badge.pass { background: rgba(74, 222, 128, 0.15); color: var(--green); border: 1px solid rgba(74, 222, 128, 0.3); }
-.status-badge.warn { background: rgba(250, 204, 21, 0.15); color: var(--yellow); border: 1px solid rgba(250, 204, 21, 0.3); }
-.status-badge.fail { background: rgba(248, 113, 113, 0.15); color: var(--red); border: 1px solid rgba(248, 113, 113, 0.3); }
-.status-badge.pending { background: rgba(96, 165, 250, 0.15); color: var(--blue); border: 1px solid rgba(96, 165, 250, 0.3); }
-.status-badge.info { background: rgba(167, 139, 250, 0.15); color: var(--purple); border: 1px solid rgba(167, 139, 250, 0.3); }
-
-.test-block { background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; padding: 0.75rem; margin-bottom: 0.75rem; }
-.test-block .test-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.4rem; }
-.test-block .test-name { font-size: 0.85rem; font-weight: 500; color: var(--accent); }
-.test-block .test-meta { font-size: 0.7rem; color: var(--text2); }
-.test-block .test-stats { display: flex; gap: 1.5rem; flex-wrap: wrap; font-size: 0.8rem; color: var(--text2); margin-top: 0.35rem; }
-.grid-2 > *, .grid-3 > * { min-width: 0; }
-
-.log-container { max-height: 400px; overflow-y: auto; background: #000; border: 1px solid var(--border); border-radius: 6px; padding: 0.75rem; font-family: var(--mono); font-size: 0.72rem; line-height: 1.5; }
-.log-container .log-line { white-space: pre; color: var(--text2); }
-.log-container .log-line.val { color: var(--green); font-weight: 500; }
-.log-container .log-line.iter { color: var(--blue); }
-.log-container .log-line.warn { color: var(--yellow); }
-.log-container .log-line.expert { color: var(--purple); }
-
-.insight-box { background: rgba(96, 165, 250, 0.06); border: 1px solid rgba(96, 165, 250, 0.2); border-radius: 6px; padding: 1rem; margin-bottom: 1rem; }
-.insight-box .title { font-size: 0.7rem; font-weight: 600; color: var(--blue); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.4rem; }
-
-.warning-box { background: rgba(248, 113, 113, 0.06); border: 1px solid rgba(248, 113, 113, 0.2); border-radius: 6px; padding: 1rem; margin-bottom: 1rem; }
-.warning-box .title { font-size: 0.7rem; font-weight: 600; color: var(--red); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.4rem; }
-
-.code-block { font-family: var(--mono); font-size: 0.8rem; background: var(--surface2); padding: 0.75rem 1rem; border-radius: 6px; margin: 0.75rem 0; overflow-x: auto; border: 1px solid var(--border); color: var(--cyan); line-height: 1.6; }
-
-ul, ol { margin: 0.5rem 0 0.75rem 1.5rem; }
-li { font-size: 0.9rem; color: var(--text); margin-bottom: 0.3rem; }
-
-.flow-diagram { font-family: var(--mono); font-size: 0.85rem; background: var(--surface2); padding: 1.25rem; border-radius: 8px; margin: 1rem 0; text-align: center; line-height: 2; border: 1px solid var(--border); color: var(--cyan); }
-
-footer { border-top: 1px solid var(--border); padding-top: 1.5rem; margin-top: 2.5rem; font-size: 0.75rem; color: var(--text2); text-align: center; }
-footer a { color: var(--text2); text-decoration: none; }
-footer a:hover { color: var(--accent); }
-
-@media (max-width: 768px) {
-  .moe-header h1 { font-size: 1.4rem; }
-  .container { padding: 1.5rem 1rem; }
-  table { display: block; width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; white-space: nowrap; }
-  .math-block { font-size: 0.78rem; padding: 0.65rem 0.75rem; }
-  .code-block { font-size: 0.75rem; padding: 0.65rem 0.75rem; }
-  .flow-diagram { overflow-x: auto; text-align: left; }
-  .section h2 { font-size: 1.2rem; }
-  .card .value { font-size: 1.2rem; }
-}
+.moe-header .badge { display: inline-block; font-family: var(--sans); font-size: 0.65rem; padding: 0.2rem 0.6rem; border-radius: 3px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; margin-bottom: 1rem; background: var(--surface2); color: var(--muted); border: 1px solid var(--border); }
+.moe-header h1 { font-size: 2rem; font-weight: 600; letter-spacing: -0.03em; line-height: 1.3; margin-bottom: 0.75rem; }
+.moe-header .subtitle { font-size: 0.95rem; color: var(--muted); margin-bottom: 0.5rem; }
+.moe-header .back-link { display: inline-block; margin-top: 1rem; padding: 0.5rem 1rem; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; color: var(--muted); text-decoration: none; font-size: 0.85rem; font-family: var(--sans); }
+.moe-header .back-link:hover { color: var(--accent); border-color: var(--muted); }
+.code-block { font-family: var(--mono); font-size: 0.8rem; background: var(--surface2); padding: 0.75rem 1rem; border-radius: 6px; margin: 0.75rem 0; overflow-x: auto; border: 1px solid var(--border); line-height: 1.6; }
+.log-container .log-line.expert { color: #a78bfa; }
+.flow-diagram { font-family: var(--mono); font-size: 0.85rem; background: var(--surface2); padding: 1.25rem; border-radius: 8px; margin: 1rem 0; text-align: center; line-height: 2; border: 1px solid var(--border); overflow-x: auto; }
+@media (max-width: 768px) { .moe-header h1 { font-size: 1.4rem; } .code-block { font-size: 0.75rem; } .flow-diagram { text-align: left; } }
 </style>
 </head>
 <body>
@@ -193,22 +106,22 @@ impact_ema[i] &larr; &rho; &middot; impact_ema[i] + (1-&rho;) &middot; mean(-&na
   <div class="grid-2">
     <div class="card">
       <div class="card-title">High-Frequency, High-Impact</div>
-      <div class="value" style="color: var(--green);">Core Experts</div>
+      <div class="value">Core Experts</div>
       <div class="note">Essential specialists — high value, should be preserved</div>
     </div>
     <div class="card">
       <div class="card-title">High-Frequency, Low-Impact</div>
-      <div class="value" style="color: var(--yellow);">Bloated Experts</div>
+      <div class="value">Bloated Experts</div>
       <div class="note">Frequently selected but low per-token impact — wasteful but not dangerous</div>
     </div>
     <div class="card">
       <div class="card-title">Low-Frequency, High-Impact</div>
-      <div class="value" style="color: var(--purple);">Rare Specialists</div>
+      <div class="value">Rare Specialists</div>
       <div class="note">Infrequently selected but valuable when used — must be preserved</div>
     </div>
     <div class="card">
       <div class="card-title">Low-Frequency, Low-Impact</div>
-      <div class="value" style="color: var(--red);">Dead Experts</div>
+      <div class="value">Dead Experts</div>
       <div class="note">Neither selected often nor impactful — replacement candidates</div>
     </div>
   </div>
@@ -325,8 +238,8 @@ L_balance = n_experts &middot; &Sigma;_i (f_i &middot; P_i)</div>
   <h3>5.2 Value Score Distribution</h3>
   <p>The value score distribution across experts in a 4-expert, 4-layer configuration typically shows a bimodal pattern: 2-3 high-value core experts (score > 0.5) and 1-2 low-value candidates for replacement (score < threshold). The gradient-based metric naturally captures the distinction between frequency and impact.</p>
 
-  <div class="insight-box">
-    <div class="title">Key Observation</div>
+  <div class="callout">
+    <div class="title">Observation</div>
     <p>The impact/frequency ratio is critical because it prevents high-frequency but low-impact experts from being wrongly classified as "valuable." A frequently selected expert that provides minimal loss reduction per token (e.g., outputting near-zero values) will have low value despite high frequency.</p>
   </div>
 
@@ -399,8 +312,8 @@ balance_loss = n_experts &middot; &Sigma;_i (f_i &middot; P_i)</div>
 <!-- Pending Work -->
 <section class="section">
   <h2>8. Pending Work & Known Issues</h2>
-  <div class="warning-box">
-    <div class="title">Known Limitations</div>
+  <div class="callout warn">
+    <div class="title">Known limitations</div>
     <ul>
       <li><strong>No streaming test yet:</strong> The lifecycle system has been validated through simulation and unit testing but not through a full training run with dynamic replacements</li>
       <li><strong>Gradient impact normalization:</strong> The gradient norm EMA for impact normalization assumes stable gradient scales; verification needed under varying learning rates and batch sizes</li>
@@ -409,8 +322,8 @@ balance_loss = n_experts &middot; &Sigma;_i (f_i &middot; P_i)</div>
     </ul>
   </div>
 
-  <div class="insight-box">
-    <div class="title">Next Steps</div>
+  <div class="callout">
+    <div class="title">Next steps</div>
     <ul>
       <li>Full training run on bytes dataset (1000 iterations) with expert replacement enabled</li>
       <li>Ablation: compare clone+noise replacement vs random init vs no replacement</li>
@@ -425,5 +338,6 @@ balance_loss = n_experts &middot; &Sigma;_i (f_i &middot; P_i)</div>
 </footer>
 
 </div>
+<script src="assets/site.js"></script>
 </body>
 </html>
