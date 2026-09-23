@@ -528,14 +528,17 @@ class MoEStream(nn.Module):
         vs = self.config.vocab_size
         logits = logits.view(B, T, np, vs)
 
+        raw_w = [1.0, 0.35, 0.15, 0.05]
+        w = raw_w[:np]
+        w_sum = sum(w)
+        w = [x / w_sum for x in w]
         pred_loss = 0.0
         for k in range(np):
-            pred_loss = pred_loss + F.cross_entropy(
+            pred_loss = pred_loss + w[k] * F.cross_entropy(
                 logits[:, :T - k, k].reshape(-1, vs),
                 targets[:, k:].reshape(-1),
                 ignore_index=-1,
             )
-        pred_loss = pred_loss / np
 
         total = pred_loss + self.config.moe_balance_coeff * moe_balance
         return total, pred_loss

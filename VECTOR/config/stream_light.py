@@ -1,4 +1,4 @@
-# Stream: first light test — 4L/128D/block128 on bytes
+# Stream: first light test — 4L/128D/block128 on bytes — with patcher + decayed loss
 dataset = 'bytes'
 batch_size = 1
 block_size = 256
@@ -24,3 +24,5 @@ eval_interval = 500
 log_interval = 10
 always_save_checkpoint = True
 out_dir = 'out_stream'
+# Patch + decayed horizons are on by default via model.py; to ablate set patch_factor=0
+patch_factor = 0  # keep light test at byte-rate for backward-compat; set 4 for 4x context

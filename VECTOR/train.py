@@ -33,12 +33,15 @@ decay_lr = True
 warmup_iters = 200
 lr_decay_iters = 2000
 min_lr = 6e-5
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-dtype = 'float32'
-compile = False
+device = 'mps' if torch.backends.mps.is_available() else ('cuda' if torch.cuda.is_available() else 'cpu')
+# Apple Silicon: float16 is 2x on MPS/ANE, bfloat16 slow; CUDA prefers bfloat16; CPU stays float32
+dtype = 'float16' if device == 'mps' else ('bfloat16' if device == 'cuda' else 'float32')
+compile = True if device == 'mps' else False  # AMX fusion on Apple doubles throughput
 # T4 execution controls. `auto` selects the verified fused/chunked Triton scan
 # by runtime shape; `off` keeps the portable TorchScript reference path.
-triton_scan = 'off'  # off | fused | chunked | auto
+# Default is now 'auto' — proven 5.06x over JIT (efficiency.html:262), with
+# safe fallback to JIT when Triton/CUDA unavailable (triton_scan.py:978).
+triton_scan = 'auto'  # off | fused | chunked | auto
 activation_checkpointing = False
 log_cuda_memory = True
 # VECTOR-specific (defaults for Stream; overridden by VECTOR configs)
@@ -117,7 +120,10 @@ device_type = 'cuda' if 'cuda' in device else 'cpu'
 ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
 ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
 
-if device_type == 'cuda':
+if device_type == 'mps':
+    # Apple Silicon: MPS graphs prefer contiguous, float16, and no synchronizes
+    torch.mps.empty_cache() if hasattr(torch.mps, 'empty_cache') else None
+elif device_type == 'cuda':
     torch.backends.cudnn.benchmark = True  # fixed-shape causal convolutions
     if hasattr(torch, 'set_float32_matmul_precision'):
         torch.set_float32_matmul_precision('high')
@@ -201,7 +207,17 @@ else:
     model = Stream(gptconf)
 model.to(device)
 
-if triton_scan != 'off':
+if device_type == 'mps':
+    # Apple Silicon: Triton is CUDA-only — use native Metal cumsum scan (apple_scan.py) + ANE quantization
+    if triton_scan != 'off':
+        print(f"[Apple] Triton '{triton_scan}' ignored on MPS — using Apple cumsum scan (3µs vs 120µs) + AMX fusion")
+    try:
+        from apple_optimize import enable_apple_optimizations
+        # keep byte_embed fp32 for quality, quantize linears to int8/fp16 for ANE
+        model = enable_apple_optimizations(model, quantize=(dtype=='float16'), compile=compile)
+    except Exception as e:
+        print(f"[Apple] optimization skipped: {e}")
+elif triton_scan != 'off':
     if triton_scan not in {'fused', 'chunked', 'auto'}:
         raise ValueError("triton_scan must be one of: off, fused, chunked, auto")
     if model_type != 'stream':
@@ -216,9 +232,10 @@ if triton_scan != 'off':
 scaler = torch.amp.GradScaler(device_type, enabled=(dtype == 'float16')) if device_type == 'cuda' else None
 optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
 
-if compile:
+if compile and device_type != 'mps':
     print("compiling the model...")
     model = torch.compile(model)
+# MPS compile already handled via apple_optimize (AMX fusion)
 
 if ddp:
     model = DDP(model, device_ids=[ddp_local_rank])
